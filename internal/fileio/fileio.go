@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
+	"time"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -22,8 +23,9 @@ const (
 	ErrPathBlocked     = "ERR_PATH_BLOCKED"
 	ErrBinaryFile      = "ERR_BINARY_FILE"
 	ErrInvalidEncoding = "ERR_INVALID_ENCODING"
-	ErrLocked          = "ERR_LOCKED"
-	ErrWriteFailed     = "ERR_WRITE_FAILED"
+	ErrLocked            = "ERR_LOCKED"
+	ErrPermissionDenied = "ERR_PERMISSION_DENIED"
+	ErrWriteFailed       = "ERR_WRITE_FAILED"
 )
 
 // Config holds server-wide settings passed from CLI flags.
@@ -75,6 +77,9 @@ func ReadFile(path string, cfg *Config) (*FileData, string) {
 
 	raw, err := os.ReadFile(canonical)
 	if err != nil {
+		if os.IsPermission(err) {
+			return nil, ErrPermissionDenied
+		}
 		return nil, ErrFileNotFound
 	}
 
@@ -138,7 +143,7 @@ func WriteFile(fd *FileData, newLines []string) string {
 	mode := info.Mode()
 
 	tempPath := fmt.Sprintf("%s.%d.%s.lapp.tmp",
-		fd.CanonicalPath, os.Getpid(), randomHex(8))
+		fd.CanonicalPath, os.Getpid(), RandomHex(8))
 
 	f, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
@@ -195,6 +200,9 @@ func WriteFile(fd *FileData, newLines []string) string {
 
 	if err := os.Rename(tempPath, fd.CanonicalPath); err != nil {
 		os.Remove(tempPath)
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
 		return ErrWriteFailed
 	}
 
@@ -279,6 +287,29 @@ func AcquireLock(canonicalPath string) (unlock func(), errCode string) {
 	return unlock, ""
 }
 
+// CleanupOrphans removes stale *.lapp.tmp files under root that are older than
+// 5 minutes. Called on server startup per §9.1. Errors are ignored — best effort.
+func CleanupOrphans(root string) {
+	cutoff := 5 * time.Minute
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if !strings.HasSuffix(d.Name(), ".lapp.tmp") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		if time.Since(info.ModTime()) > cutoff {
+			os.Remove(path) //nolint:errcheck
+		}
+		return nil
+	})
+}
+
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 // splitLines walks raw file bytes and returns lines and per-line terminators.
@@ -324,7 +355,7 @@ func isBlocked(relPath string, blockPatterns, allowPatterns []string) bool {
 }
 
 // randomHex returns n random lowercase hex characters.
-func randomHex(n int) string {
+func RandomHex(n int) string {
 	b := make([]byte, (n+1)/2)
 	if _, err := rand.Read(b); err != nil {
 		// Fallback: use process ID + a counter derived from address bits.

@@ -95,6 +95,9 @@ func main() {
 		DefaultLimit:  *limitFlag,
 	}
 
+	// Startup: remove orphaned *.lapp.tmp files older than 5 minutes (§9.1).
+	fileio.CleanupOrphans(root)
+	
 	if err := server.New(cfg).Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "lapp: server error: %v\n", err)
 		os.Exit(1)
