@@ -45,7 +45,7 @@ go install github.com/lapp-dev/lapp/cmd/lapp@latest
 Add this to your project's `CLAUDE.md` to guide the model toward lapp tools:
 
 ```
-This project uses lapp for file editing. Prefer lapp_read / lapp_edit / lapp_write over the built-in Read / Edit / Write tools.
+This project uses lapp for file editing. Prefer lapp_read / lapp_edit / lapp_write / lapp_grep over the built-in Read / Edit / Write / Grep tools.
 ```
 
 lapp emits this hint to stderr on startup as a reminder.

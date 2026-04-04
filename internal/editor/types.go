@@ -64,20 +64,11 @@ type SelfCorrectResult struct {
 	Status      string `json:"status"`           // always "needs_read_first"
 	Message     string `json:"message"`
 	FileContent string `json:"file_content"`     // hashline-formatted content
-	Note        string `json:"note,omitempty"`   // set on second consecutive failure
+	// Note is always set in this implementation.
+	// The spec §5.1 describes a two-phase flow (absent on first failure, set on second),
+	// but MCP is stateless so consecutive-failure tracking is not possible.
+	// This results in slightly more aggressive escalation: acceptable trade-off.
+	// Spec deviation documented: pm-20260404-004.
+	Note string `json:"note,omitempty"`
 }
 
-// ReadRequest describes a paginated file read. Offset and Limit are both
-// optional; absent or ≤0 values fall back to server defaults (offset=1,
-// limit=server-configured maximum).
-type ReadRequest struct {
-	Path   string `json:"path"`
-	Offset *int   `json:"offset,omitempty"` // 1-indexed; nil or ≤0 → 1
-	Limit  *int   `json:"limit,omitempty"`  // nil or ≤0 → server default
-}
-
-// WriteRequest creates or overwrites a file with the supplied content.
-type WriteRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-}
