@@ -138,6 +138,9 @@ func ReadFile(path string, cfg *Config) (*FileData, string) {
 func WriteFile(fd *FileData, newLines []string) string {
 	info, err := os.Stat(fd.CanonicalPath)
 	if err != nil {
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
 		return ErrWriteFailed
 	}
 	mode := info.Mode()
@@ -147,6 +150,9 @@ func WriteFile(fd *FileData, newLines []string) string {
 
 	f, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
+		if os.IsPermission(err) {
+			return ErrPermissionDenied
+		}
 		return ErrWriteFailed
 	}
 

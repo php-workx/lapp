@@ -259,11 +259,17 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	tmpPath := fmt.Sprintf("%s.%d.%s.lapp.tmp", canonical, os.Getpid(), fileio.RandomHex(8))
 	f, createErr := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if createErr != nil {
-		return mcp.NewToolResultError("cannot write file: " + createErr.Error()), nil
+		if os.IsPermission(createErr) {
+			return mcp.NewToolResultError(fileio.ErrPermissionDenied), nil
+		}
+		return mcp.NewToolResultError("cannot create temp file: " + createErr.Error()), nil
 	}
 	if _, writeErr := f.Write([]byte(content)); writeErr != nil {
 		f.Close()
 		os.Remove(tmpPath)
+		if os.IsPermission(writeErr) {
+			return mcp.NewToolResultError(fileio.ErrPermissionDenied), nil
+		}
 		return mcp.NewToolResultError("cannot write file: " + writeErr.Error()), nil
 	}
 	if closeErr := f.Close(); closeErr != nil {
@@ -301,12 +307,12 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		if p, ok2 := v.(string); ok2 && p != "" {
 			resolved, resolveErr := filepath.EvalSymlinks(filepath.Clean(p))
 			if resolveErr != nil {
-				return mcp.NewToolResultError(editor.ErrFileNotFound), nil
+				return mcp.NewToolResultError(fileio.ErrFileNotFound), nil
 			}
 			// Enforce root containment on the resolved path.
 			root := s.cfg.Root + string(os.PathSeparator)
 			if !strings.HasPrefix(resolved, root) && resolved != s.cfg.Root {
-				return mcp.NewToolResultError(editor.ErrPathOutsideRoot), nil
+				return mcp.NewToolResultError(fileio.ErrPathOutsideRoot), nil
 			}
 			searchRoot = resolved
 		}
@@ -402,6 +408,7 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			}
 			if prev > 0 && k > prev+1 {
 				sb.WriteString("    ...\n")
+				outputLines++ // separator counts toward cap
 			}
 			prefix := "    "
 			if matchSet[k] {
