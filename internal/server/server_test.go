@@ -125,7 +125,7 @@ func extractText(t *testing.T, r *mcp.CallToolResult) string {
 
 // parseHashRef extracts the first "N#XX" ref from a formatted line like "N#XX:content".
 func parseHashRef(line string) string {
-	re := regexp.MustCompile(`(\d+#[A-Z]{2})`)
+	re := regexp.MustCompile(`(\d+#[ZPMQVRWSNKTXJBYH]{2})`)
 	m := re.FindString(line)
 	return m
 }
@@ -585,19 +585,13 @@ func TestBOMRoundTrip(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	if len(raw) < 3 || raw[0] != 0xEF || raw[1] != 0xBB || raw[2] != 0xBF {
-		t.Errorf("BOM not preserved: first bytes = %x", raw[:minInt(3, len(raw))])
+		t.Errorf("BOM not preserved: first bytes = %x", raw[:min(3, len(raw))])
 	}
 	if !strings.Contains(string(raw), "LINE2_EDITED") {
 		t.Errorf("edited content not found in file: %s", string(raw))
 	}
 }
 
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 
 // TestNoOpLeavesNoTempFile verifies that when all edits are no-ops,
 // handleEdit returns ERR_NO_OP and leaves no *.lapp.tmp files on disk.

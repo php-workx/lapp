@@ -399,17 +399,17 @@ func FormatMismatchError(mismatches []RefMismatch, lines []string) string {
 // because MCP is stateless — we cannot track consecutive failures (§5.1,
 // pre-mortem fix pm-20260404-004).
 func BuildSelfCorrectResult(lines []string, limit int) *SelfCorrectResult {
-	cap := len(lines)
-	if limit > 0 && limit < cap {
-		cap = limit
+	displayLines := len(lines)
+	if limit > 0 && limit < displayLines {
+		displayLines = limit
 	}
-	formatted := make([]string, cap)
-	for i := 0; i < cap; i++ {
+	formatted := make([]string, displayLines)
+	for i := 0; i < displayLines; i++ {
 		formatted[i] = hashline.FormatLine(lines[i], i+1)
 	}
 	var truncNote string
-	if cap < len(lines) {
-		truncNote = fmt.Sprintf("\n[Showing lines 1-%d of %d. Use offset parameter to read more.]", cap, len(lines))
+	if displayLines < len(lines) {
+		truncNote = fmt.Sprintf("\n[Showing lines 1-%d of %d. Use offset parameter to read more.]", displayLines, len(lines))
 	}
 	return &SelfCorrectResult{
 		Status:      "needs_read_first",
