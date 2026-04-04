@@ -420,46 +420,28 @@ func IsNoOp(original, result []string) bool {
 func ApplyEdits(fd *fileio.FileData, req *EditRequest) ([]string, *EditResult, string, string) {
 	lines := fd.Lines
 
-	// Check for zero valid hashline refs — trigger self-correct instead.
-	hasValidRef := false
+	// Self-correct detection: if the model supplied refs but NONE of them parse as
+	// valid lapp addressing (N#XX, 0:, EOF:), the model likely used the built-in
+	// Read tool instead of lapp_read and is sending plain-text addresses.
+	// Return SELF_CORRECT so the server can return structured file content.
+	//
+	// Condition: at least one non-empty ref field exists AND no ref parses OK.
+	// If ALL ref fields are empty, ValidateEdits catches it as ERR_INVALID_EDIT.
+	hasAnyRef := false
+	hasValidHashlineRef := false
 	for _, e := range req.Edits {
-		refs := []string{e.Anchor, e.Start, e.End}
-		for _, r := range refs {
+		for _, r := range []string{e.Anchor, e.Start, e.End} {
 			if r == "" {
 				continue
 			}
-			lineNum, _, err := hashline.ParseRef(r)
-			if err == nil && lineNum != 0 && lineNum != -1 {
-				hasValidRef = true
-				break
+			hasAnyRef = true
+			if _, _, err := hashline.ParseRef(r); err == nil {
+				hasValidHashlineRef = true
 			}
-		}
-		if hasValidRef {
-			break
 		}
 	}
-	// If NO refs are valid hashline refs (e.g. model used built-in Read),
-	// return SelfCorrectResult as a structured response, not an error code.
-	// Callers (server) must check for this case via the returned result.
-	// We signal it by returning errCode=="SELF_CORRECT".
-	if !hasValidRef && len(req.Edits) > 0 {
-		// All edits have no parseable refs at all.
-		allNoRef := true
-		for _, e := range req.Edits {
-			for _, r := range []string{e.Anchor, e.Start, e.End} {
-				if r != "" {
-					_, _, err := hashline.ParseRef(r)
-					if err != nil {
-						// Unparseable ref — self-correct is appropriate.
-					} else {
-						allNoRef = false
-					}
-				}
-			}
-		}
-		if allNoRef {
-			return nil, nil, "SELF_CORRECT", ""
-		}
+	if hasAnyRef && !hasValidHashlineRef {
+		return nil, nil, "SELF_CORRECT", ""
 	}
 
 	parsed, errCode, errDetail := ValidateEdits(req.Edits, lines)

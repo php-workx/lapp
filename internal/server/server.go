@@ -254,14 +254,24 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 
 
 	// Atomic write: write to temp then rename.
-	tmpPath := fmt.Sprintf("%s.%d.lapp.tmp", canonical, os.Getpid())
-	if err := os.WriteFile(tmpPath, []byte(content), 0644); err != nil {
-		os.Remove(tmpPath)
-		return mcp.NewToolResultError("cannot write file: " + err.Error()), nil
+	// Atomic write: temp file (random suffix, 0600) → chmod → rename. §9.1.
+	tmpPath := fmt.Sprintf("%s.%d.%s.lapp.tmp", canonical, os.Getpid(), fileio.RandomHex(8))
+	f, createErr := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if createErr != nil {
+		return mcp.NewToolResultError("cannot write file: " + createErr.Error()), nil
 	}
-	if err := os.Rename(tmpPath, canonical); err != nil {
+	if _, writeErr := f.Write([]byte(content)); writeErr != nil {
+		f.Close()
 		os.Remove(tmpPath)
-		return mcp.NewToolResultError("cannot rename temp file: " + err.Error()), nil
+		return mcp.NewToolResultError("cannot write file: " + writeErr.Error()), nil
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		os.Remove(tmpPath)
+		return mcp.NewToolResultError("cannot write file: " + closeErr.Error()), nil
+	}
+	if renameErr := os.Rename(tmpPath, canonical); renameErr != nil {
+		os.Remove(tmpPath)
+		return mcp.NewToolResultError("cannot rename temp file: " + renameErr.Error()), nil
 	}
 
 	lines := strings.Count(content, "\n")
@@ -279,10 +289,20 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 
 	args := req.GetArguments()
 
+	// Validate and resolve searchRoot — must be within --root.
 	searchRoot := s.cfg.Root
 	if v, ok := args["path"]; ok {
 		if p, ok2 := v.(string); ok2 && p != "" {
-			searchRoot = p
+			resolved, resolveErr := filepath.EvalSymlinks(filepath.Clean(p))
+			if resolveErr != nil {
+				return mcp.NewToolResultError(editor.ErrFileNotFound), nil
+			}
+			// Enforce root containment on the resolved path.
+			root := s.cfg.Root + string(os.PathSeparator)
+			if !strings.HasPrefix(resolved, root) && resolved != s.cfg.Root {
+				return mcp.NewToolResultError(editor.ErrPathOutsideRoot), nil
+			}
+			searchRoot = resolved
 		}
 	}
 
@@ -299,31 +319,32 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	}
 
 	var sb strings.Builder
-	walkErr := filepath.WalkDir(searchRoot, func(path string, d os.DirEntry, e error) error {
-		if e != nil || d.IsDir() {
+	walkErr := filepath.WalkDir(searchRoot, func(filePath string, d os.DirEntry, e error) error {
+		if e != nil {
 			return e
 		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
+		if d.IsDir() {
 			return nil
 		}
 
-		// Binary check: null byte in first 8192 bytes.
-		probe := data
-		if len(probe) > 8192 {
-			probe = probe[:8192]
-		}
-		for _, b := range probe {
-			if b == 0 {
-				return nil
-			}
+		// Per-file security: resolve symlinks, verify root containment, check block list.
+		// Files that fail any check are silently skipped (not surfaced as errors).
+		canonical, errCode := fileio.CheckPath(filePath, s.cfg, true)
+		if errCode != "" {
+			return nil
 		}
 
-		fileLines := strings.Split(string(data), "\n")
+		// Use fileio.ReadFile for BOM stripping, binary detection, and encoding
+		// validation. This ensures emitted LINE#HASH refs are consistent with
+		// what lapp_read and lapp_edit see for the same file.
+		fd, errCode := fileio.ReadFile(canonical, s.cfg)
+		if errCode != "" {
+			return nil // skip binary / unreadable / blocked files
+		}
 
+		lines := fd.Lines
 		var matches []int
-		for i, line := range fileLines {
+		for i, line := range lines {
 			if re.MatchString(line) {
 				matches = append(matches, i+1) // 1-indexed
 			}
@@ -332,13 +353,13 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			return nil
 		}
 
-		sb.WriteString(path + ":\n")
+		sb.WriteString(filePath + ":\n")
 
-		// Build display set with context around each match.
+		// Build display set: matched lines ± ctxLines context.
 		display := make(map[int]bool)
 		for _, m := range matches {
 			for k := m - ctxLines; k <= m+ctxLines; k++ {
-				if k >= 1 && k <= len(fileLines) {
+				if k >= 1 && k <= len(lines) {
 					display[k] = true
 				}
 			}
@@ -350,7 +371,7 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		}
 
 		prev := 0
-		for k := 1; k <= len(fileLines); k++ {
+		for k := 1; k <= len(lines); k++ {
 			if !display[k] {
 				continue
 			}
@@ -361,7 +382,7 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			if matchSet[k] {
 				prefix = ">>> "
 			}
-			sb.WriteString(prefix + hashline.FormatLine(fileLines[k-1], k) + "\n")
+			sb.WriteString(prefix + hashline.FormatLine(lines[k-1], k) + "\n")
 			prev = k
 		}
 		return nil

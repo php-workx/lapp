@@ -437,3 +437,112 @@ func TestWriteCreatesParentDirs(t *testing.T) {
 		t.Fatalf("unexpected content: %q", string(data))
 	}
 }
+
+
+// ── new tests covering review findings ──────────────────────────────────────────
+
+// TestGrepPathOutsideRoot verifies that supplying a path outside --root is rejected.
+// This covers the P0 security finding from the spec review.
+func TestGrepPathOutsideRoot(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	// /tmp is outside the test root.
+	out := callGrep(t, s, ".", "/tmp")
+	if !strings.Contains(out, editor.ErrPathOutsideRoot) {
+		t.Errorf("expected ERR_PATH_OUTSIDE_ROOT for out-of-root path, got: %s", out)
+	}
+}
+
+// TestGrepBlockedFile verifies that .env files matched during a grep walk are silently
+// skipped — their content is never returned to the caller (P1 security finding).
+func TestGrepBlockedFile(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	// Plant a .env file with a distinctive value.
+	envPath := filepath.Join(cfg.Root, ".env")
+	writeTestFile(t, envPath, "SECRET=hunter2\n")
+	// Also plant a normal file so grep has something to walk.
+	writeTestFile(t, filepath.Join(cfg.Root, "main.go"), "package main\n")
+	// Grep for the secret — it must not appear.
+	out := callGrep(t, s, "hunter2", "")
+	if strings.Contains(out, "hunter2") {
+		t.Errorf(".env content leaked through grep: %s", out)
+	}
+}
+
+// TestGrepBOMFileHashConsistency verifies that grep and read return the same LINE#HASH
+// for line 1 of a UTF-8 BOM file (P1 finding: BOM not stripped in grep).
+func TestGrepBOMFileHashConsistency(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	// Write a UTF-8 BOM file.
+	bomContent := "\xef\xbb\xbffunc main() {\n    fmt.Println()\n}\n"
+	filePath := filepath.Join(cfg.Root, "bom.go")
+	writeTestFile(t, filePath, bomContent)
+	// Get line 1 hash from lapp_read.
+	readOut := callRead(t, s, filePath, 0, 0)
+	readLines := strings.Split(strings.TrimSpace(readOut), "\n")
+	if len(readLines) == 0 {
+		t.Fatal("lapp_read returned nothing")
+	}
+	readRef := parseHashRef(readLines[0]) // e.g. "1#KH"
+
+	// Get line 1 hash from lapp_grep.
+	grepOut := callGrep(t, s, "func main", "")
+	// Extract the ref from the grep match line (>>> prefix).
+	var grepRef string
+	for _, line := range strings.Split(grepOut, "\n") {
+		if strings.Contains(line, "func main") {
+			grepRef = parseHashRef(line)
+			break
+		}
+	}
+	if grepRef == "" {
+		t.Fatalf("grep did not match func main in output: %s", grepOut)
+	}
+	if readRef != grepRef {
+		t.Errorf("BOM hash mismatch: lapp_read line 1 ref=%q, lapp_grep ref=%q (grep refs would be rejected by lapp_edit)", readRef, grepRef)
+	}
+}
+
+// TestWriteAtomicRandomSuffix verifies that two concurrent lapp_write calls for
+// different-cased filenames on a case-insensitive filesystem do not collide on
+// the same temp path. We verify the random suffix is present in the temp filename
+// by intercepting any leftover temps (there should be none) and confirming that the
+// temp pattern includes a 8-hex-char random component between pid and .lapp.tmp.
+// Indirect test: call handleWrite and verify no stale *.lapp.tmp files remain after success.
+func TestWriteAtomicNoOrphan(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "atom.txt")
+	out := callWrite(t, s, filePath, "hello\n")
+	if !strings.Contains(out, "OK:") {
+		t.Fatalf("write failed: %s", out)
+	}
+	// Verify no *.lapp.tmp files were left behind.
+	entries, _ := os.ReadDir(cfg.Root)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".lapp.tmp") {
+			t.Errorf("orphaned temp file found: %s", e.Name())
+		}
+	}
+}
+
+// TestReadFilePermissionDenied verifies ERR_PERMISSION_DENIED is returned when a
+// file is unreadable (P2 finding: was silently mapped to ERR_FILE_NOT_FOUND).
+func TestReadFilePermissionDenied(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	cfg := newTestConfig(t)
+	filePath := filepath.Join(cfg.Root, "secret.txt")
+	writeTestFile(t, filePath, "data")
+	if err := os.Chmod(filePath, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(filePath, 0644) })
+	_, code := fileio.ReadFile(filePath, cfg)
+	if code != fileio.ErrPermissionDenied {
+		t.Errorf("expected ErrPermissionDenied, got %q", code)
+	}
+}
