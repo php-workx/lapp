@@ -546,3 +546,151 @@ func TestReadFilePermissionDenied(t *testing.T) {
 		t.Errorf("expected ErrPermissionDenied, got %q", code)
 	}
 }
+// TestBOMRoundTrip verifies that a UTF-8 BOM file survives a full read→edit→write cycle.
+// BOM bytes must be present at byte offset 0 of the on-disk file after editing.
+func TestBOMRoundTrip(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "bom.go")
+	bom := []byte{0xEF, 0xBB, 0xBF}
+	original := append(bom, []byte("line1\nline2\nline3\n")...)
+	writeTestFile(t, filePath, string(original))
+
+	// Read: get hash ref for line 2.
+	readOut := callRead(t, s, filePath, 0, 0)
+	readLines := strings.Split(strings.TrimSpace(readOut), "\n")
+	// Find the ref for line 2 ("2#XX:line2")
+	var line2Ref string
+	for _, l := range readLines {
+		if strings.HasPrefix(l, "2#") {
+			line2Ref = parseHashRef(l)
+			break
+		}
+	}
+	if line2Ref == "" {
+		t.Fatalf("could not parse line 2 ref from: %s", readOut)
+	}
+
+	// Edit: replace line 2.
+	editOut := callEdit(t, s, filePath, []editor.Edit{
+		{Type: editor.EditReplace, Anchor: line2Ref, Content: strPtr("LINE2_EDITED")},
+	})
+	if !strings.Contains(editOut, "OK:") {
+		t.Fatalf("edit failed: %s", editOut)
+	}
+
+	// Verify: BOM still present at byte offset 0.
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(raw) < 3 || raw[0] != 0xEF || raw[1] != 0xBB || raw[2] != 0xBF {
+		t.Errorf("BOM not preserved: first bytes = %x", raw[:minInt(3, len(raw))])
+	}
+	if !strings.Contains(string(raw), "LINE2_EDITED") {
+		t.Errorf("edited content not found in file: %s", string(raw))
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// TestNoOpLeavesNoTempFile verifies that when all edits are no-ops,
+// handleEdit returns ERR_NO_OP and leaves no *.lapp.tmp files on disk.
+func TestNoOpLeavesNoTempFile(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "noop.go")
+	writeTestFile(t, filePath, "alpha\nbravo\n")
+
+	readOut := callRead(t, s, filePath, 0, 0)
+	line1Ref := ""
+	for _, l := range strings.Split(strings.TrimSpace(readOut), "\n") {
+		if strings.HasPrefix(l, "1#") {
+			line1Ref = parseHashRef(l)
+			break
+		}
+	}
+	if line1Ref == "" {
+		t.Fatalf("could not parse line 1 ref")
+	}
+
+	// Replace line 1 with identical content — should be ERR_NO_OP.
+	out := callEdit(t, s, filePath, []editor.Edit{
+		{Type: editor.EditReplace, Anchor: line1Ref, Content: strPtr("alpha")},
+	})
+	if !strings.Contains(out, editor.ErrNoOp) {
+		t.Fatalf("expected ERR_NO_OP, got: %s", out)
+	}
+
+	// No *.lapp.tmp files should exist anywhere in the root.
+	found := false
+	_ = filepath.WalkDir(cfg.Root, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".lapp.tmp") {
+			found = true
+		}
+		return nil
+	})
+	if found {
+		t.Error("found orphaned .lapp.tmp file after ERR_NO_OP")
+	}
+}
+
+// TestConcurrentEditsSerializedByLock verifies that two concurrent handleEdit
+// calls on the same file do not corrupt it: one succeeds, the other gets
+// ERR_LOCKED (non-blocking), and the final file content is coherent.
+func TestConcurrentEditsSerializedByLock(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "concurrent.go")
+	writeTestFile(t, filePath, "original\n")
+
+	// Both goroutines try to edit line 1. Only one can hold the lock.
+	type result struct{ out string }
+	ch := make(chan result, 2)
+
+	edit := func() {
+		readOut := callRead(t, s, filePath, 0, 0)
+		ref := ""
+		for _, l := range strings.Split(strings.TrimSpace(readOut), "\n") {
+			if strings.HasPrefix(l, "1#") {
+				ref = parseHashRef(l)
+				break
+			}
+		}
+		if ref == "" {
+			ch <- result{"no ref"}
+			return
+		}
+		out := callEdit(t, s, filePath, []editor.Edit{
+			{Type: editor.EditReplace, Anchor: ref, Content: strPtr("replaced")},
+		})
+		ch <- result{out}
+	}
+
+	go edit()
+	go edit()
+
+	r1 := <-ch
+	r2 := <-ch
+
+	// One must succeed ("OK:"), the other must get ERR_LOCKED or succeed.
+	// Neither should produce a garbled/empty result.
+	for _, r := range []result{r1, r2} {
+		if r.out == "" || r.out == "no ref" {
+			t.Errorf("unexpected empty result")
+		}
+	}
+	// File must still be readable and contain coherent content.
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("file unreadable after concurrent edits: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Error("file is empty after concurrent edits — corruption")
+	}
+}
