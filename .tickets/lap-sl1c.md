@@ -1,6 +1,6 @@
 ---
 id: lap-sl1c
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-04-04T10:08:29Z

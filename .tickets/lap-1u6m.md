@@ -1,6 +1,6 @@
 ---
 id: lap-1u6m
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-04-04T10:08:48Z
