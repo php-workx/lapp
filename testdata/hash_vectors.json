@@ -1,0 +1,107 @@
+[
+  {
+    "input": "func main() {",
+    "lineNum": 1,
+    "expectedHash": "KH"
+  },
+  {
+    "input": "    return nil",
+    "lineNum": 10,
+    "expectedHash": "KT"
+  },
+  {
+    "input": "import \"fmt\"",
+    "lineNum": 1,
+    "expectedHash": "VW"
+  },
+  {
+    "input": "}",
+    "lineNum": 1,
+    "expectedHash": "PS"
+  },
+  {
+    "input": "}",
+    "lineNum": 5,
+    "expectedHash": "WN"
+  },
+  {
+    "input": "}",
+    "lineNum": 10,
+    "expectedHash": "BN"
+  },
+  {
+    "input": "}",
+    "lineNum": 50,
+    "expectedHash": "TR"
+  },
+  {
+    "input": "{",
+    "lineNum": 1,
+    "expectedHash": "VS"
+  },
+  {
+    "input": "",
+    "lineNum": 1,
+    "expectedHash": "KM"
+  },
+  {
+    "input": "   ",
+    "lineNum": 3,
+    "expectedHash": "HW"
+  },
+  {
+    "input": "\t",
+    "lineNum": 2,
+    "expectedHash": "KM"
+  },
+  {
+    "input": "x := 1",
+    "lineNum": 1,
+    "expectedHash": "YJ"
+  },
+  {
+    "input": "x := 1",
+    "lineNum": 5,
+    "expectedHash": "YJ"
+  },
+  {
+    "input": "x := 1",
+    "lineNum": 10,
+    "expectedHash": "YJ"
+  },
+  {
+    "input": "x := 1   ",
+    "lineNum": 1,
+    "expectedHash": "YJ"
+  },
+  {
+    "input": "\t    mixed",
+    "lineNum": 4,
+    "expectedHash": "YV"
+  },
+  {
+    "input": "// 日本語コメント",
+    "lineNum": 1,
+    "expectedHash": "NT"
+  },
+  {
+    "input": "café := \"ok\"",
+    "lineNum": 1,
+    "expectedHash": "RY"
+  },
+  {
+    "input": "// simple comment",
+    "lineNum": 5,
+    "expectedHash": "BM"
+  },
+  {
+    "input": "    if err != nil {",
+    "lineNum": 6,
+    "expectedHash": "WY"
+  },
+  {
+    "input": "        return fmt.Errorf(\"missing ID\")",
+    "lineNum": 3,
+    "expectedHash": "MM"
+  }
+]

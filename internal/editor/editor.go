@@ -1,0 +1,727 @@
+package editor
+
+import (
+	"fmt"
+	"log"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/lapp-dev/lapp/internal/fileio"
+	"github.com/lapp-dev/lapp/pkg/hashline"
+)
+
+// hashlinePrefixRE matches the LINE#HASH: prefix produced by lapp_read.
+var hashlinePrefixRE = regexp.MustCompile(`^\d+#[ZPMQVRWSNKTXJBYH]{2}:`)
+
+// RefMismatch records a hash mismatch for one edit reference.
+type RefMismatch struct {
+	EditIndex int
+	Line      int    // 1-indexed line number
+	Expected  string // hash from the stale reference
+	Actual    string // current hash of the line
+}
+
+// parsedEdit is the resolved form of an Edit after validation.
+type parsedEdit struct {
+	idx       int
+	edit      Edit
+	startLine int // first affected line (1-indexed)
+	endLine   int // last affected line (1-indexed; == startLine for single-line ops)
+}
+
+// typePrecedence maps EditType to a sort key; lower = applied first in bottom-up pass.
+func typePrecedence(t EditType) int {
+	switch t {
+	case EditDelete:
+		return 0
+	case EditReplace:
+		return 1
+	case EditInsertBefore:
+		return 2
+	case EditInsertAfter:
+		return 3
+	default:
+		return 4
+	}
+}
+
+// SanitizeContent strips hashline prefixes and unified-diff markers if they
+// appear uniformly on all non-empty lines (§9.5).
+func SanitizeContent(content string) string {
+	lines := strings.Split(content, "\n")
+
+	// Pass 1: strip hashline prefixes if ALL non-empty lines carry them.
+	allHashline := true
+	for _, l := range lines {
+		if l == "" {
+			continue
+		}
+		if !hashlinePrefixRE.MatchString(l) {
+			allHashline = false
+			break
+		}
+	}
+	if allHashline {
+		for i, l := range lines {
+			if l == "" {
+				continue
+			}
+			// Strip up to and including the first ':'
+			if idx := strings.Index(l, ":"); idx >= 0 {
+				lines[i] = l[idx+1:]
+			}
+		}
+	}
+
+	// Pass 2: strip leading '+' if ALL non-empty lines have one.
+	allPlus := true
+	for _, l := range lines {
+		if l == "" {
+			continue
+		}
+		if !strings.HasPrefix(l, "+") {
+			allPlus = false
+			break
+		}
+	}
+	if allPlus {
+		for i, l := range lines {
+			if l == "" {
+				continue
+			}
+			lines[i] = l[1:]
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// NormalizeNewlines replaces literal `\n` (two-character sequence backslash-n)
+// with a real newline character (§6.3). Logs when normalization is applied.
+func NormalizeNewlines(content string) string {
+	if strings.Contains(content, `\n`) {
+		log.Printf("lapp: normalizing literal \\n sequence in content")
+		return strings.ReplaceAll(content, `\n`, "\n")
+	}
+	return content
+}
+
+// splitContent normalizes and splits content into lines, discarding a trailing
+// empty element when content ends with '\n' (§6.3).
+func splitContent(content string) []string {
+	content = NormalizeNewlines(content)
+	content = SanitizeContent(content)
+	parts := strings.Split(content, "\n")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	return parts
+}
+
+// ValidateEdits checks field combinations, parses all refs, and verifies hashes.
+// Returns (parsedEdits, errCode, errDetail). errCode=="" on success.
+func ValidateEdits(edits []Edit, lines []string) ([]parsedEdit, string, string) {
+	if len(edits) > 100 {
+		return nil, ErrTooManyEdits, fmt.Sprintf("batch of %d edits exceeds 100-edit limit", len(edits))
+	}
+
+	parsed := make([]parsedEdit, 0, len(edits))
+	var mismatches []RefMismatch
+
+	for i, e := range edits {
+		pe, errCode, errDetail := validateOne(i, e, lines)
+		if errCode != "" {
+			return nil, errCode, errDetail
+		}
+		// Check for hash mismatch (ERR_INVALID_RANGE deferred above too).
+		// Hash mismatch refs are recorded for a batch error later.
+		parsed = append(parsed, pe)
+	}
+
+	// Second pass: verify all hashes. We do this after structural validation
+	// so structural errors (field combos) get priority over stale refs.
+	for i, pe := range parsed {
+		e := edits[i]
+		mms := verifyHashes(i, e, pe, lines)
+		mismatches = append(mismatches, mms...)
+	}
+
+	if len(mismatches) > 0 {
+		return nil, ErrHashMismatch, FormatMismatchError(mismatches, lines)
+	}
+
+	return parsed, "", ""
+}
+
+// validateOne validates a single edit's field combination and parses its refs.
+// Returns the parsed edit and any structural error. Hash mismatches are NOT
+// checked here — they are collected separately so all are reported at once.
+func validateOne(idx int, e Edit, lines []string) (parsedEdit, string, string) {
+	switch e.Type {
+	case EditReplace:
+		if e.Content == nil {
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: replace requires content", idx)
+		}
+		return parseAddressing(idx, e, lines, false)
+
+	case EditInsertAfter, EditInsertBefore:
+		if e.Start != "" || e.End != "" {
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: %s does not support range addressing (start/end)", idx, e.Type)
+		}
+		if e.Anchor == "" {
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: %s requires anchor", idx, e.Type)
+		}
+		if e.Content == nil || *e.Content == "" {
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: %s requires non-empty content", idx, e.Type)
+		}
+		lineNum, _, err := hashline.ParseRef(e.Anchor)
+		if err != nil {
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: invalid anchor ref %q: %v", idx, e.Anchor, err)
+		}
+		// Resolve special anchors to actual line positions.
+		if lineNum == 0 { // BOF
+			lineNum = 0
+		} else if lineNum == -1 { // EOF
+			lineNum = len(lines)
+		}
+		return parsedEdit{idx: idx, edit: e, startLine: lineNum, endLine: lineNum}, "", ""
+
+	case EditDelete:
+		if e.Content != nil {
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: delete must not include content", idx)
+		}
+		return parseAddressing(idx, e, lines, false)
+
+	default:
+		return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: unknown type %q", idx, e.Type)
+	}
+}
+
+// parseAddressing resolves the anchor or start/end pair for replace and delete.
+func parseAddressing(idx int, e Edit, lines []string, _ bool) (parsedEdit, string, string) {
+	if e.Anchor != "" {
+		// Single-line mode.
+		if e.Start != "" || e.End != "" {
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: cannot use anchor together with start/end", idx)
+		}
+		lineNum, _, err := hashline.ParseRef(e.Anchor)
+		if err != nil {
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: invalid anchor ref %q: %v", idx, e.Anchor, err)
+		}
+		if lineNum == 0 || lineNum == -1 {
+			// BOF/EOF anchors only valid for insert_after; should not reach here.
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: BOF/EOF anchors only valid for insert_after", idx)
+		}
+		return parsedEdit{idx: idx, edit: e, startLine: lineNum, endLine: lineNum}, "", ""
+	}
+
+	// Range mode.
+	if e.Start == "" || e.End == "" {
+		return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: requires anchor or both start+end", idx)
+	}
+	startLine, _, err := hashline.ParseRef(e.Start)
+	if err != nil {
+		return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: invalid start ref %q: %v", idx, e.Start, err)
+	}
+	endLine, _, err := hashline.ParseRef(e.End)
+	if err != nil {
+		return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: invalid end ref %q: %v", idx, e.End, err)
+	}
+	if startLine == 0 || startLine == -1 || endLine == 0 || endLine == -1 {
+		return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: BOF/EOF anchors not allowed in range ops", idx)
+	}
+	if startLine > endLine {
+		return parsedEdit{}, ErrInvalidRange, fmt.Sprintf("edit[%d]: start line %d > end line %d", idx, startLine, endLine)
+	}
+	return parsedEdit{idx: idx, edit: e, startLine: startLine, endLine: endLine}, "", ""
+}
+
+// verifyHashes checks hash references in a parsed edit against the current lines.
+func verifyHashes(idx int, e Edit, pe parsedEdit, lines []string) []RefMismatch {
+	var out []RefMismatch
+
+	checkRef := func(ref string) {
+		lineNum, expectedHash, err := hashline.ParseRef(ref)
+		if err != nil || lineNum <= 0 {
+			return // special anchors or bad refs caught earlier
+		}
+		if lineNum < 1 || lineNum > len(lines) {
+			// out-of-range: treat as mismatch (line doesn't exist)
+			out = append(out, RefMismatch{EditIndex: idx, Line: lineNum, Expected: expectedHash, Actual: ""})
+			return
+		}
+		actual := hashline.HashLine(lines[lineNum-1], lineNum)
+		if actual != expectedHash {
+			out = append(out, RefMismatch{EditIndex: idx, Line: lineNum, Expected: expectedHash, Actual: actual})
+		}
+	}
+
+	switch {
+	case e.Anchor != "":
+		checkRef(e.Anchor)
+	default:
+		checkRef(e.Start)
+		if e.End != e.Start {
+			checkRef(e.End)
+		}
+	}
+	return out
+}
+
+// DetectOverlaps returns pairs of edit indices that have overlapping line ranges.
+func DetectOverlaps(parsed []parsedEdit) [][2]int {
+	var conflicts [][2]int
+	for i := 0; i < len(parsed); i++ {
+		for j := i + 1; j < len(parsed); j++ {
+			a, b := parsed[i], parsed[j]
+			if overlaps(a, b) {
+				conflicts = append(conflicts, [2]int{a.idx, b.idx})
+			}
+		}
+	}
+	return conflicts
+}
+
+// overlaps returns true when two parsed edits target intersecting line ranges.
+// Two inserts on the same anchor are explicitly NOT overlapping (sequential).
+func overlaps(a, b parsedEdit) bool {
+	// Two inserts on the exact same anchor are sequential, not overlapping.
+	sameAnchorInsert := func(x, y parsedEdit) bool {
+		tx, ty := x.edit.Type, y.edit.Type
+		if (tx == EditInsertAfter || tx == EditInsertBefore) &&
+			(ty == EditInsertAfter || ty == EditInsertBefore) {
+			return x.edit.Anchor == y.edit.Anchor && x.edit.Anchor != ""
+		}
+		return false
+	}
+	if sameAnchorInsert(a, b) {
+		return false
+	}
+	// Ranges [a.start, a.end] and [b.start, b.end] overlap when they share at
+	// least one line (closed intervals).
+	return a.startLine <= b.endLine && b.startLine <= a.endLine
+}
+
+// FormatMismatchError builds the §8.1 error message with context lines and
+// remapping table.
+func FormatMismatchError(mismatches []RefMismatch, lines []string) string {
+	const ctx = 2
+
+	mismatchSet := make(map[int]RefMismatch)
+	for _, m := range mismatches {
+		mismatchSet[m.Line] = m
+	}
+
+	// Collect display lines (mismatch ± ctx context).
+	displaySet := make(map[int]bool)
+	for _, m := range mismatches {
+		lo := m.Line - ctx
+		if lo < 1 {
+			lo = 1
+		}
+		hi := m.Line + ctx
+		if hi > len(lines) {
+			hi = len(lines)
+		}
+		for l := lo; l <= hi; l++ {
+			displaySet[l] = true
+		}
+	}
+	sorted := make([]int, 0, len(displaySet))
+	for l := range displaySet {
+		sorted = append(sorted, l)
+	}
+	sort.Ints(sorted)
+
+	n := len(mismatches)
+	suffix := "s have"
+	if n == 1 {
+		suffix = " has"
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("%d line%s changed since last read. Use the updated LINE#HASH references below (>>> marks changed lines).", n, suffix))
+	sb.WriteString("\n")
+
+	prev := -1
+	for _, lineNum := range sorted {
+		if prev != -1 && lineNum > prev+1 {
+			sb.WriteString("    ...\n")
+		}
+		prev = lineNum
+
+		var content string
+		if lineNum >= 1 && lineNum <= len(lines) {
+			content = lines[lineNum-1]
+		}
+		currentHash := hashline.HashLine(content, lineNum)
+		ref := fmt.Sprintf("%d#%s", lineNum, currentHash)
+		if _, bad := mismatchSet[lineNum]; bad {
+			sb.WriteString(fmt.Sprintf(">>> %s:%s\n", ref, content))
+		} else {
+			sb.WriteString(fmt.Sprintf("    %s:%s\n", ref, content))
+		}
+	}
+
+	// Remapping table.
+	sb.WriteString("\nStale → Current:\n")
+	for _, m := range mismatches {
+		var content string
+		if m.Line >= 1 && m.Line <= len(lines) {
+			content = lines[m.Line-1]
+		}
+		currentHash := hashline.HashLine(content, m.Line)
+		sb.WriteString(fmt.Sprintf("  %d#%s → %d#%s\n", m.Line, m.Expected, m.Line, currentHash))
+	}
+
+	return sb.String()
+}
+
+// BuildSelfCorrectResult constructs the SelfCorrectResult returned when
+// lapp_edit is called without a prior lapp_read. The Note is always included
+// because MCP is stateless — we cannot track consecutive failures (§5.1,
+// pre-mortem fix pm-20260404-004).
+func BuildSelfCorrectResult(lines []string, limit int) *SelfCorrectResult {
+	cap := len(lines)
+	if limit > 0 && limit < cap {
+		cap = limit
+	}
+	formatted := make([]string, cap)
+	for i := 0; i < cap; i++ {
+		formatted[i] = hashline.FormatLine(lines[i], i+1)
+	}
+	var truncNote string
+	if cap < len(lines) {
+		truncNote = fmt.Sprintf("\n[Showing lines 1-%d of %d. Use offset parameter to read more.]", cap, len(lines))
+	}
+	return &SelfCorrectResult{
+		Status:      "needs_read_first",
+		Message:     "No valid LINE#HASH references found. Use the file_content below to construct your edits.",
+		FileContent: strings.Join(formatted, "\n") + truncNote,
+		Note:        "If unable to proceed after using these references, report the edit as blocked rather than retrying further.",
+	}
+}
+
+// IsNoOp returns true if the original and result line slices are identical.
+func IsNoOp(original, result []string) bool {
+	if len(original) != len(result) {
+		return false
+	}
+	for i := range original {
+		if original[i] != result[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ApplyEdits validates and applies a batch of edits to fd.Lines.
+// Returns (newLines, result, errCode, errDetail). errCode=="" means success.
+func ApplyEdits(fd *fileio.FileData, req *EditRequest) ([]string, *EditResult, string, string) {
+	lines := fd.Lines
+
+	// Check for zero valid hashline refs — trigger self-correct instead.
+	hasValidRef := false
+	for _, e := range req.Edits {
+		refs := []string{e.Anchor, e.Start, e.End}
+		for _, r := range refs {
+			if r == "" {
+				continue
+			}
+			lineNum, _, err := hashline.ParseRef(r)
+			if err == nil && lineNum != 0 && lineNum != -1 {
+				hasValidRef = true
+				break
+			}
+		}
+		if hasValidRef {
+			break
+		}
+	}
+	// If NO refs are valid hashline refs (e.g. model used built-in Read),
+	// return SelfCorrectResult as a structured response, not an error code.
+	// Callers (server) must check for this case via the returned result.
+	// We signal it by returning errCode=="SELF_CORRECT".
+	if !hasValidRef && len(req.Edits) > 0 {
+		// All edits have no parseable refs at all.
+		allNoRef := true
+		for _, e := range req.Edits {
+			for _, r := range []string{e.Anchor, e.Start, e.End} {
+				if r != "" {
+					_, _, err := hashline.ParseRef(r)
+					if err != nil {
+						// Unparseable ref — self-correct is appropriate.
+					} else {
+						allNoRef = false
+					}
+				}
+			}
+		}
+		if allNoRef {
+			return nil, nil, "SELF_CORRECT", ""
+		}
+	}
+
+	parsed, errCode, errDetail := ValidateEdits(req.Edits, lines)
+	if errCode != "" {
+		return nil, nil, errCode, errDetail
+	}
+
+	conflicts := DetectOverlaps(parsed)
+	if len(conflicts) > 0 {
+		return nil, nil, ErrOverlappingEdits, fmt.Sprintf("overlapping edits: pairs %v", conflicts)
+	}
+
+	// Sort bottom-up (descending endLine, then type precedence, then idx).
+	sort.SliceStable(parsed, func(i, j int) bool {
+		a, b := parsed[i], parsed[j]
+		if a.endLine != b.endLine {
+			return a.endLine > b.endLine
+		}
+		pa, pb := typePrecedence(a.edit.Type), typePrecedence(b.edit.Type)
+		if pa != pb {
+			return pa < pb
+		}
+		// Same-anchor inserts: sort DESCENDING by idx so that the last insert
+		// is applied first. Each subsequent (earlier-idx) insert splices at the
+		// same position, pushing later inserts down — leaving them in original
+		// array order in the final result.
+		if (a.edit.Type == EditInsertAfter || a.edit.Type == EditInsertBefore) &&
+			a.edit.Anchor == b.edit.Anchor && a.edit.Anchor != "" {
+			return a.idx > b.idx
+		}
+		return a.idx < b.idx
+	})
+
+	// Apply edits bottom-up.
+	result := make([]string, len(lines))
+	copy(result, lines)
+
+	for _, pe := range parsed {
+		result = applyOne(pe, result)
+	}
+
+	if IsNoOp(lines, result) {
+		return nil, nil, ErrNoOp, "all edits produce identical content"
+	}
+
+	diff, linesChanged := generateDiff(lines, result, req.Path)
+	editResult := &EditResult{
+		Path:         req.Path,
+		LinesChanged: linesChanged,
+		Diff:         diff,
+	}
+	return result, editResult, "", ""
+}
+
+// applyOne applies a single parsed edit to the line slice and returns the updated slice.
+func applyOne(pe parsedEdit, lines []string) []string {
+	e := pe.edit
+	switch e.Type {
+	case EditReplace:
+		var newContent []string
+		if e.Content != nil && *e.Content != "" {
+			newContent = splitContent(*e.Content)
+		}
+		// splice: replace [startLine-1 : endLine] with newContent
+		start := pe.startLine - 1
+		end := pe.endLine
+		if start < 0 {
+			start = 0
+		}
+		if end > len(lines) {
+			end = len(lines)
+		}
+		return splice(lines, start, end, newContent)
+
+	case EditInsertAfter:
+		newContent := splitContent(*e.Content)
+		pos := pe.startLine // insert AFTER line pe.startLine → splice at position pe.startLine
+		// BOF anchor (lineNum==0) → insert at position 0
+		if pe.startLine == 0 {
+			pos = 0
+		}
+		return splice(lines, pos, pos, newContent)
+
+	case EditInsertBefore:
+		newContent := splitContent(*e.Content)
+		pos := pe.startLine - 1 // insert BEFORE line → splice at position pe.startLine-1
+		if pos < 0 {
+			pos = 0
+		}
+		return splice(lines, pos, pos, newContent)
+
+	case EditDelete:
+		start := pe.startLine - 1
+		end := pe.endLine
+		if start < 0 {
+			start = 0
+		}
+		if end > len(lines) {
+			end = len(lines)
+		}
+		return splice(lines, start, end, nil)
+	}
+	return lines
+}
+
+// splice replaces lines[start:end] with replacement, returning the new slice.
+func splice(lines []string, start, end int, replacement []string) []string {
+	result := make([]string, 0, len(lines)-( end-start)+len(replacement))
+	result = append(result, lines[:start]...)
+	result = append(result, replacement...)
+	result = append(result, lines[end:]...)
+	return result
+}
+
+// generateDiff produces a simplified unified diff and counts changed lines.
+func generateDiff(original, updated []string, path string) (string, int) {
+	const ctxLines = 2
+
+	ops := lcs(original, updated)
+
+	// Group ops into index-pair hunks [start, end).
+	type hunk struct{ start, end int }
+	var hunks []hunk
+	i := 0
+	for i < len(ops) {
+		if ops[i].kind == ' ' {
+			i++
+			continue
+		}
+		// Found a change. Start hunk with ctxLines prefix.
+		start := i - ctxLines
+		if start < 0 {
+			start = 0
+		}
+		// Extend through all close changes.
+		end := i
+		for end < len(ops) {
+			if ops[end].kind != ' ' {
+				end++
+				continue
+			}
+			// Count the gap of context lines.
+			gap, k := 0, end
+			for k < len(ops) && ops[k].kind == ' ' {
+				gap++
+				k++
+			}
+			if gap > 2*ctxLines || k == len(ops) {
+				break
+			}
+			end = k
+		}
+		// Add ctxLines suffix.
+		end += ctxLines
+		if end > len(ops) {
+			end = len(ops)
+		}
+		hunks = append(hunks, hunk{start, end})
+		i = end
+	}
+
+	if len(hunks) == 0 {
+		return "", 0
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("--- a/%s\n", path))
+	sb.WriteString(fmt.Sprintf("+++ b/%s\n", path))
+
+	added, removed := 0, 0
+	// Track line numbers by walking ops from the start each hunk.
+	oldBase, newBase := 1, 1 // line numbers at ops[0]
+	opBase := 0
+
+	for _, h := range hunks {
+		// Advance base counters to h.start.
+		for opBase < h.start {
+			if ops[opBase].kind != '+' {
+				oldBase++
+			}
+			if ops[opBase].kind != '-' {
+				newBase++
+			}
+			opBase++
+		}
+		oldStart, newStart := oldBase, newBase
+		oldCount, newCount := 0, 0
+		for _, op := range ops[h.start:h.end] {
+			switch op.kind {
+			case ' ':
+				oldCount++
+				newCount++
+			case '-':
+				oldCount++
+			case '+':
+				newCount++
+			}
+		}
+		sb.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount))
+		for _, op := range ops[h.start:h.end] {
+			sb.WriteByte(byte(op.kind))
+			sb.WriteString(op.line)
+			sb.WriteByte('\n')
+			switch op.kind {
+			case '-':
+				removed++
+				oldBase++
+			case '+':
+				added++
+				newBase++
+			default:
+				oldBase++
+				newBase++
+			}
+			opBase++
+		}
+	}
+	return sb.String(), added + removed
+}
+
+// editOp is a single unit in an LCS-based edit script.
+type editOp struct {
+	kind rune // ' ' = context, '-' = removed, '+' = added
+	line string
+}
+
+// lcs computes the edit script between two line slices via O(n*m) LCS DP.
+func lcs(a, b []string) []editOp {
+	n, m := len(a), len(b)
+	dp := make([][]int, n+1)
+	for i := range dp {
+		dp[i] = make([]int, m+1)
+	}
+	for i := 1; i <= n; i++ {
+		for j := 1; j <= m; j++ {
+			if a[i-1] == b[j-1] {
+				dp[i][j] = dp[i-1][j-1] + 1
+			} else if dp[i-1][j] > dp[i][j-1] {
+				dp[i][j] = dp[i-1][j]
+			} else {
+				dp[i][j] = dp[i][j-1]
+			}
+		}
+	}
+	ops := make([]editOp, 0, n+m)
+	i, j := n, m
+	for i > 0 || j > 0 {
+		if i > 0 && j > 0 && a[i-1] == b[j-1] {
+			ops = append(ops, editOp{' ', a[i-1]})
+			i--
+			j--
+		} else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
+			ops = append(ops, editOp{'+', b[j-1]})
+			j--
+		} else {
+			ops = append(ops, editOp{'-', a[i-1]})
+			i--
+		}
+	}
+	// Reverse to get forward order.
+	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
+		ops[l], ops[r] = ops[r], ops[l]
+	}
+	return ops
+}
