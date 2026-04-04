@@ -198,12 +198,9 @@ func WriteFile(fd *FileData, newLines []string) string {
 		return ErrWriteFailed
 	}
 
-	if err := os.Rename(tempPath, fd.CanonicalPath); err != nil {
+	if errCode := renameAtomic(tempPath, fd.CanonicalPath); errCode != "" {
 		os.Remove(tempPath)
-		if os.IsPermission(err) {
-			return ErrPermissionDenied
-		}
-		return ErrWriteFailed
+		return errCode
 	}
 
 	return ""

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -253,8 +254,8 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 
 
-	// Atomic write: write to temp then rename.
-	// Atomic write: temp file (random suffix, 0600) → chmod → rename. §9.1.
+	// Atomic write: temp file (0600) → chmod 0644 → rename. §9.1.
+	// New files created by lapp_write default to 0644 (conventional source file permissions).
 	tmpPath := fmt.Sprintf("%s.%d.%s.lapp.tmp", canonical, os.Getpid(), fileio.RandomHex(8))
 	f, createErr := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if createErr != nil {
@@ -268,6 +269,11 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	if closeErr := f.Close(); closeErr != nil {
 		os.Remove(tmpPath)
 		return mcp.NewToolResultError("cannot write file: " + closeErr.Error()), nil
+	}
+	// Restore conventional source file permissions before rename makes it visible.
+	if chmodErr := os.Chmod(tmpPath, 0644); chmodErr != nil {
+		os.Remove(tmpPath)
+		return mcp.NewToolResultError("cannot set file permissions: " + chmodErr.Error()), nil
 	}
 	if renameErr := os.Rename(tmpPath, canonical); renameErr != nil {
 		os.Remove(tmpPath)
@@ -318,7 +324,21 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		return mcp.NewToolResultError("invalid pattern: " + err.Error()), nil
 	}
 
+	const maxGrepFiles = 100
+	// Cap output lines at DefaultLimit (same as lapp_read) to keep MCP
+	// responses within context-window budget. Spec §10, §5.5.
+	maxOutputLines := s.cfg.DefaultLimit
+	if maxOutputLines <= 0 {
+		maxOutputLines = 2000
+	}
+
 	var sb strings.Builder
+	filesMatched := 0
+	outputLines := 0
+
+	// errCapReached is a sentinel returned from WalkDir to stop early.
+	errCapReached := errors.New("grep cap reached")
+
 	walkErr := filepath.WalkDir(searchRoot, func(filePath string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
@@ -326,34 +346,36 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		if d.IsDir() {
 			return nil
 		}
+		if filesMatched >= maxGrepFiles || outputLines >= maxOutputLines {
+			return errCapReached
+		}
 
 		// Per-file security: resolve symlinks, verify root containment, check block list.
-		// Files that fail any check are silently skipped (not surfaced as errors).
 		canonical, errCode := fileio.CheckPath(filePath, s.cfg, true)
 		if errCode != "" {
 			return nil
 		}
 
-		// Use fileio.ReadFile for BOM stripping, binary detection, and encoding
-		// validation. This ensures emitted LINE#HASH refs are consistent with
-		// what lapp_read and lapp_edit see for the same file.
+		// Use fileio.ReadFile for BOM stripping, binary detection, and encoding validation.
 		fd, errCode := fileio.ReadFile(canonical, s.cfg)
 		if errCode != "" {
-			return nil // skip binary / unreadable / blocked files
+			return nil
 		}
 
 		lines := fd.Lines
 		var matches []int
 		for i, line := range lines {
 			if re.MatchString(line) {
-				matches = append(matches, i+1) // 1-indexed
+				matches = append(matches, i+1)
 			}
 		}
 		if len(matches) == 0 {
 			return nil
 		}
 
+		filesMatched++
 		sb.WriteString(filePath + ":\n")
+		outputLines++
 
 		// Build display set: matched lines ± ctxLines context.
 		display := make(map[int]bool)
@@ -364,7 +386,6 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 				}
 			}
 		}
-
 		matchSet := make(map[int]bool)
 		for _, m := range matches {
 			matchSet[m] = true
@@ -375,6 +396,10 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			if !display[k] {
 				continue
 			}
+			if outputLines >= maxOutputLines {
+				sb.WriteString("    ... [output truncated]\n")
+				return errCapReached
+			}
 			if prev > 0 && k > prev+1 {
 				sb.WriteString("    ...\n")
 			}
@@ -383,13 +408,17 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 				prefix = ">>> "
 			}
 			sb.WriteString(prefix + hashline.FormatLine(lines[k-1], k) + "\n")
+			outputLines++
 			prev = k
 		}
 		return nil
 	})
 
-	if walkErr != nil {
+	if walkErr != nil && walkErr != errCapReached {
 		return mcp.NewToolResultError("grep error: " + walkErr.Error()), nil
+	}
+	if walkErr == errCapReached {
+		sb.WriteString(fmt.Sprintf("\n[Results truncated: showed %d files / %d lines. Narrow your pattern or path.]", filesMatched, outputLines))
 	}
 
 	result := sb.String()
