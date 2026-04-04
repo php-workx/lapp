@@ -1,6 +1,6 @@
 ---
 id: lap-srw6
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-04-04T10:11:05Z

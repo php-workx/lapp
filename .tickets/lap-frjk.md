@@ -1,6 +1,6 @@
 ---
 id: lap-frjk
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-04-04T10:09:28Z
