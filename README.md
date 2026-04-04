@@ -1,0 +1,132 @@
+# lapp
+
+An MCP server that gives AI coding agents a better way to read and edit files using **hashline addressing** — every line is tagged with a line number and content hash, so the model references those tags to specify edits instead of reproducing unchanged code.
+
+This reduces model output tokens per edit. All operations are deterministic (no LLM inference). Written in Go — single static binary.
+
+Matches the hashline format of [oh-my-pi](https://github.com/can1357/oh-my-pi), so models trained on that format transfer immediately.
+
+## Installation
+
+```bash
+go install github.com/lapp-dev/lapp/cmd/lapp@latest
+```
+
+## MCP Configuration
+
+### Claude Code (`~/.claude.json`)
+
+```json
+{
+  "mcpServers": {
+    "lapp": {
+      "command": "lapp",
+      "args": ["--root", "/path/to/project"]
+    }
+  }
+}
+```
+
+### Codex (`.codex/mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "lapp": {
+      "command": "lapp",
+      "args": ["--root", "/path/to/project"]
+    }
+  }
+}
+```
+
+## Recommended CLAUDE.md Entry
+
+Add this to your project's `CLAUDE.md` to guide the model toward lapp tools:
+
+```
+This project uses lapp for file editing. Prefer lapp_read / lapp_edit / lapp_write over the built-in Read / Edit / Write tools.
+```
+
+lapp emits this hint to stderr on startup as a reminder.
+
+## Tools
+
+### `lapp_read`
+
+Read a file with `LINE#HASH:content` prefixes. Supports pagination via `offset`/`limit`. Hash references are valid for the entire file and can be combined across pages.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Absolute path |
+| `offset` | integer | no | Start line, 1-indexed (default: 1) |
+| `limit` | integer | no | Max lines (default: 2000) |
+
+### `lapp_edit`
+
+Edit a file using `LINE#HASH` references from `lapp_read`. All edits validated atomically — if any reference is stale, nothing is written.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Absolute path |
+| `edits` | array | yes | Edit operations (max 100) |
+
+Edit operations:
+
+```json
+// Replace single line
+{"type": "replace", "anchor": "5#SN", "content": "new content"}
+
+// Replace range
+{"type": "replace", "start": "2#KT", "end": "4#QW", "content": "new\ncontent"}
+
+// Insert after (special anchors: "0:" = beginning, "EOF:" = end)
+{"type": "insert_after", "anchor": "6#PM", "content": "inserted line"}
+
+// Insert before
+{"type": "insert_before", "anchor": "5#SN", "content": "inserted line"}
+
+// Delete
+{"type": "delete", "anchor": "3#ZP"}
+```
+
+### `lapp_write`
+
+Create a new file. Returns an error if the file already exists.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Absolute path |
+| `content` | string | yes | Complete file content |
+
+### `lapp_grep`
+
+Search files and return matches with `LINE#HASH` references usable directly in `lapp_edit`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pattern` | string | yes | Regex pattern |
+| `path` | string | no | File or directory (default: root) |
+| `context` | integer | no | Context lines (default: 2) |
+
+## Server Flags
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `--root <dir>` | `LAPP_ROOT` | CWD | Restrict operations to this directory |
+| `--limit <n>` | `LAPP_LIMIT` | 2000 | Default max lines for lapp_read |
+| `--block <glob>` | `LAPP_BLOCK` (colon-separated) | see below | Add blocked path pattern |
+| `--allow <glob>` | `LAPP_ALLOW` (colon-separated) | — | Remove blocked path pattern |
+| `--log-file <path>` | `LAPP_LOG_FILE` | stderr | Log destination |
+| `--version` | — | — | Print version and exit |
+
+## Security
+
+All file operations are restricted to `--root`. The default block list covers sensitive files:
+`**/.env`, `**/.env.*`, `**/secrets.*`, `**/credentials.*`, `**/*.pem`, `**/*.key`, `**/*.p12`, `**/*.pfx`, `**/.aws/credentials`, `**/.aws/config`.
+
+Use `--allow '**/.env.local'` to unblock a specific pattern. Use `--block` to add patterns.
+
+## License
+
+MIT
