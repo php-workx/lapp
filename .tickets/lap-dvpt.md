@@ -1,6 +1,6 @@
 ---
 id: lap-dvpt
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-04-04T10:10:51Z
