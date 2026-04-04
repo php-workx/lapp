@@ -16,10 +16,11 @@ var hashlinePrefixRE = regexp.MustCompile(`^\d+#[ZPMQVRWSNKTXJBYH]{2}:`)
 
 // RefMismatch records a hash mismatch for one edit reference.
 type RefMismatch struct {
-	EditIndex int
-	Line      int    // 1-indexed line number
-	Expected  string // hash from the stale reference
-	Actual    string // current hash of the line
+	EditIndex  int
+	Line       int    // 1-indexed line number
+	Expected   string // hash from the stale reference
+	Actual     string // current hash of the line (empty when OutOfRange)
+	OutOfRange bool   // true when line number exceeds file length
 }
 
 // parsedEdit is the resolved form of an Edit after validation.
@@ -98,9 +99,12 @@ func SanitizeContent(content string) string {
 }
 
 // NormalizeNewlines replaces literal `\n` (two-character sequence backslash-n)
-// with a real newline character (§6.3). Logs when normalization is applied.
+// with a real newline character (§6.3). Only normalizes when content has NO real
+// newlines — if real newlines are already present, the \n sequences are intentional
+// code content (regex patterns, format strings, escape sequences) and must be preserved.
+// Logs when normalization is applied.
 func NormalizeNewlines(content string) string {
-	if strings.Contains(content, `\n`) {
+	if strings.Contains(content, `\n`) && !strings.Contains(content, "\n") {
 		log.Printf("lapp: normalizing literal \\n sequence in content")
 		return strings.ReplaceAll(content, `\n`, "\n")
 	}
@@ -148,6 +152,14 @@ func ValidateEdits(edits []Edit, lines []string) ([]parsedEdit, string, string) 
 	}
 
 	if len(mismatches) > 0 {
+		// ERR_LINE_OUT_OF_RANGE takes priority: the referenced line doesn't exist,
+		// so the remapping table would be meaningless. Model must re-read.
+		for _, m := range mismatches {
+			if m.OutOfRange {
+				return nil, ErrLineOutOfRange, fmt.Sprintf("line %d is out of range (file has %d lines); re-read the file to get current line numbers", m.Line, len(lines))
+			}
+		}
+		// All mismatches are hash-only: file content changed. Provide remapping.
 		return nil, ErrHashMismatch, FormatMismatchError(mismatches, lines)
 	}
 
@@ -179,10 +191,14 @@ func validateOne(idx int, e Edit, lines []string) (parsedEdit, string, string) {
 		if err != nil {
 			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: invalid anchor ref %q: %v", idx, e.Anchor, err)
 		}
-		// Resolve special anchors to actual line positions.
-		if lineNum == 0 { // BOF
-			lineNum = 0
-		} else if lineNum == -1 { // EOF
+		// Reject BOF/EOF special anchors for insert_before — §6.1 permits them
+		// only for insert_after. insert_before with these produces silently wrong
+		// results (inserts before last line instead of at end, etc.).
+		if e.Type == EditInsertBefore && (lineNum == 0 || lineNum == -1) {
+			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: BOF/EOF anchors are only valid for insert_after, not insert_before", idx)
+		}
+		// Resolve EOF anchor for insert_after.
+		if lineNum == -1 {
 			lineNum = len(lines)
 		}
 		return parsedEdit{idx: idx, edit: e, startLine: lineNum, endLine: lineNum}, "", ""
@@ -247,8 +263,9 @@ func verifyHashes(idx int, e Edit, pe parsedEdit, lines []string) []RefMismatch 
 			return // special anchors or bad refs caught earlier
 		}
 		if lineNum < 1 || lineNum > len(lines) {
-			// out-of-range: treat as mismatch (line doesn't exist)
-			out = append(out, RefMismatch{EditIndex: idx, Line: lineNum, Expected: expectedHash, Actual: ""})
+			// Line number is outside the file — distinct from hash mismatch.
+			// The model must re-read the file to learn the actual length.
+			out = append(out, RefMismatch{EditIndex: idx, Line: lineNum, Expected: expectedHash, OutOfRange: true})
 			return
 		}
 		actual := hashline.HashLine(lines[lineNum-1], lineNum)

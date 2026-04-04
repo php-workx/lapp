@@ -474,3 +474,129 @@ func TestApplyEdits_InvalidRange(t *testing.T) {
 		t.Errorf("expected ErrInvalidRange, got %s", code)
 	}
 }
+
+
+// ── wave 2 bugfix tests ──────────────────────────────────────────────
+
+// lap-1u6m: ERR_LINE_OUT_OF_RANGE instead of ERR_HASH_MISMATCH for out-of-bounds refs.
+func TestApplyEdits_LineOutOfRange(t *testing.T) {
+	lines := testLines5 // 5 lines
+	fd := makeFileData(lines)
+	// Reference line 10 in a 5-line file.
+	_, _, code, detail := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
+		{Type: editor.EditDelete, Anchor: "10#ZZ"},
+	}))
+	if code != editor.ErrLineOutOfRange {
+		t.Errorf("expected ErrLineOutOfRange for line 10 in 5-line file, got %s", code)
+	}
+	if !strings.Contains(detail, "out of range") {
+		t.Errorf("detail should mention out of range, got: %s", detail)
+	}
+}
+
+func TestApplyEdits_RangeEndOutOfRange(t *testing.T) {
+	lines := testLines5 // 5 lines
+	fd := makeFileData(lines)
+	// Range end line is beyond file.
+	_, _, code, _ := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
+		{Type: editor.EditDelete, Start: ref(lines, 3), End: "8#YY"},
+	}))
+	if code != editor.ErrLineOutOfRange {
+		t.Errorf("expected ErrLineOutOfRange for end=8 in 5-line file, got %s", code)
+	}
+}
+
+func TestApplyEdits_HashMismatchNotLineOutOfRange(t *testing.T) {
+	lines := testLines5 // 5 lines
+	fd := makeFileData(lines)
+	// Line 3 exists but hash is wrong — must be ERR_HASH_MISMATCH, not out-of-range.
+	badRef := strings.Replace(ref(lines, 3), ref(lines, 3)[strings.Index(ref(lines, 3), "#")+1:], "ZZ", 1)
+	_, _, code, _ := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
+		{Type: editor.EditDelete, Anchor: badRef},
+	}))
+	if code != editor.ErrHashMismatch {
+		t.Errorf("expected ErrHashMismatch for valid line with wrong hash, got %s", code)
+	}
+}
+
+func TestApplyEdits_OutOfRangePriorityOverMismatch(t *testing.T) {
+	// Batch: edit 1 out-of-range, edit 2 hash mismatch → ERR_LINE_OUT_OF_RANGE wins.
+	lines := testLines5
+	fd := makeFileData(lines)
+	badRef := strings.Replace(ref(lines, 3), ref(lines, 3)[strings.Index(ref(lines, 3), "#")+1:], "ZZ", 1)
+	_, _, code, _ := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
+		{Type: editor.EditReplace, Anchor: "10#ZZ", Content: strPtr("x")}, // out of range
+		{Type: editor.EditDelete, Anchor: badRef},                           // hash mismatch
+	}))
+	if code != editor.ErrLineOutOfRange {
+		t.Errorf("expected ErrLineOutOfRange to take priority, got %s", code)
+	}
+}
+
+// lap-sl1c: BOF/EOF anchors rejected on insert_before.
+func TestApplyEdits_InsertBefore_BOF_Rejected(t *testing.T) {
+	lines := testLines5
+	fd := makeFileData(lines)
+	_, _, code, _ := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
+		{Type: editor.EditInsertBefore, Anchor: "0:", Content: strPtr("x")},
+	}))
+	if code != editor.ErrInvalidEdit {
+		t.Errorf("expected ErrInvalidEdit for insert_before with BOF anchor, got %s", code)
+	}
+}
+
+func TestApplyEdits_InsertBefore_EOF_Rejected(t *testing.T) {
+	lines := testLines5
+	fd := makeFileData(lines)
+	_, _, code, _ := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
+		{Type: editor.EditInsertBefore, Anchor: "EOF:", Content: strPtr("x")},
+	}))
+	if code != editor.ErrInvalidEdit {
+		t.Errorf("expected ErrInvalidEdit for insert_before with EOF anchor, got %s", code)
+	}
+}
+
+func TestApplyEdits_InsertAfter_BOF_EOF_StillWork(t *testing.T) {
+	// Verify insert_after with BOF/EOF still works correctly.
+	lines := testLines5
+	fd := makeFileData(lines)
+	// insert_after BOF
+	nl, _, code, _ := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
+		{Type: editor.EditInsertAfter, Anchor: "0:", Content: strPtr("PREPEND")},
+	}))
+	if code != "" {
+		t.Fatalf("insert_after BOF failed: %s", code)
+	}
+	if nl[0] != "PREPEND" {
+		t.Errorf("expected PREPEND as first line, got %v", nl)
+	}
+}
+
+// lap-ccwb: NormalizeNewlines preserves intentional backslash-n in code.
+func TestNormalizeNewlines_PreservesCodeBackslashN(t *testing.T) {
+	// content with real newline AND literal backslash-n: no normalization.
+	content := "fmt.Println(\"hello\\nworld\")" + "\n" + "return nil"
+	got := editor.NormalizeNewlines(content)
+	if got != content {
+		t.Errorf("should not normalize when real newlines present; got %q", got)
+	}
+}
+
+func TestNormalizeNewlines_NormalizesWhenNoRealNewlines(t *testing.T) {
+	// content with only literal backslash-n and no real newlines: normalize.
+	content := `line1\nline2\nline3`
+	got := editor.NormalizeNewlines(content)
+	if !strings.Contains(got, "\n") {
+		t.Errorf("expected real newlines after normalization, got %q", got)
+	}
+	parts := strings.Split(got, "\n")
+	if len(parts) != 3 {
+		t.Errorf("expected 3 lines after normalization, got %d: %v", len(parts), parts)
+	}
+}
+
+func TestNormalizeNewlines_EmptyString(t *testing.T) {
+	if got := editor.NormalizeNewlines(""); got != "" {
+		t.Errorf("expected empty, got %q", got)
+	}
+}
