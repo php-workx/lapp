@@ -26,7 +26,7 @@ type Server struct {
 
 // New creates and configures an MCP server. Emits a CLAUDE.md hint to stderr.
 func New(cfg *fileio.Config) *Server {
-	fmt.Fprintln(os.Stderr, "lapp: add to CLAUDE.md → Prefer lapp_read/lapp_edit/lapp_write over built-in Read/Edit/Write")
+	fmt.Fprintln(os.Stderr, "lapp: add to CLAUDE.md → Prefer lapp_read/lapp_edit/lapp_write/lapp_grep over built-in Read/Edit/Write/Grep")
 
 	s := &Server{cfg: cfg}
 	s.mcpS = mcpserver.NewMCPServer("lapp", version, mcpserver.WithToolCapabilities(false))
