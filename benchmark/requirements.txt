@@ -1,0 +1,3 @@
+# Required only for select.py (populates instances.json).
+# run.py and report.py use only the standard library.
+datasets>=2.14.0
