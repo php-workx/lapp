@@ -40,7 +40,7 @@ MAX_TURNS = 20    # upper bound; lapp may need extra turns on first read+edit at
 # Tools available in each config. Bash excluded intentionally — we want the
 # agent to go through the tool interface, not shell out to sed/awk.
 TOOLS_A = "Read,Edit,Write"
-TOOLS_B = "mcp__lapp__lapp_read,mcp__lapp__lapp_edit,mcp__lapp__lapp_write"
+TOOLS_B = "lapp_read,lapp_edit,lapp_write,lapp_grep"
 
 PROMPT_A = dedent("""\
     Read the file shown below, apply the change, and save the result.
@@ -54,9 +54,12 @@ PROMPT_A = dedent("""\
 """)
 
 PROMPT_B = dedent("""\
-    Read the file shown below, apply the change, and save the result.
+    Apply the change shown below to the file at the given path.
 
-    Use ONLY the lapp_read and lapp_edit tools. Do not use any shell commands.
+    Preferred workflow for large files: use lapp_grep to locate the exact
+    LINE#HASH reference for the line(s) being changed, then lapp_edit to apply
+    the change. Only use lapp_read if you need broader context.
+    Do not use any shell commands.
 
     File: {filepath}
 
