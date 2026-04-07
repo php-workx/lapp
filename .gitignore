@@ -1,3 +1,5 @@
 # AgentOps session artifacts (auto-added)
 .agents/
 __pycache__/
+benchmark/repos/
+benchmark/results/
