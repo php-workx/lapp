@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-A/B benchmark runner: standard Claude Code tools vs. lapp MCP tools.
+A/B benchmark: standard Read/Edit vs. lapp_read/lapp_edit.
 
-For each instance in instances.json:
-  1. Clone the repo at base_commit into a temp directory.
-  2. Run Config A (standard Read/Edit/Write tools) — capture output + diff.
-  3. Reset the repo to base_commit.
-  4. Run Config B (lapp_read/lapp_edit/lapp_write/lapp_grep tools) — capture output + diff.
-  5. Write results/{instance_id}.json.
+For each instance, the agent is given a pre-fetched source file and asked to:
+  1. Read the file using its tool set.
+  2. Apply a specific change (shown as a unified diff in the prompt).
+  3. Save the result.
 
-Both configs allow Bash so the agent can navigate the repo, but file edits are
-forced through the respective tool set via --allowedTools.
+This measures tool-interface token cost in isolation — not bug-finding ability.
+Config A uses the built-in Read + Edit tools.
+Config B uses lapp_read + lapp_edit.
+
+Bash is excluded from both configs so file edits must go through the
+respective tool set (prevents sed/echo workarounds from polluting the signal).
 
 Usage:
-  python benchmark/run.py                          # run all instances
-  BENCHMARK_IDS=id1,id2 python benchmark/run.py   # run a subset
-  SKIP_EXISTING=0 python benchmark/run.py         # re-run completed instances
+    python benchmark/run.py
+    BENCHMARK_IDS=id1,id2 python benchmark/run.py     # subset
+    SKIP_EXISTING=0 python benchmark/run.py           # re-run all
 """
 
 import json
@@ -28,90 +30,120 @@ from pathlib import Path
 from textwrap import dedent
 
 BENCHMARK_DIR = Path(__file__).parent
-RESULTS_DIR = BENCHMARK_DIR / "results"
+FILES_DIR     = BENCHMARK_DIR / "files"
+RESULTS_DIR   = BENCHMARK_DIR / "results"
 INSTANCES_FILE = BENCHMARK_DIR / "instances.json"
 
-# Timeout per agent run (seconds). File-editing tasks on small repos should
-# complete well within this; increase if you see frequent timeouts.
-TIMEOUT = 600
+TIMEOUT   = 300   # seconds per agent run; read+edit of a small file is fast
+MAX_TURNS = 20    # upper bound; lapp may need extra turns on first read+edit attempts
 
-# Maximum agent turns before the run is aborted.
-MAX_TURNS = 20
+# Tools available in each config. Bash excluded intentionally — we want the
+# agent to go through the tool interface, not shell out to sed/awk.
+TOOLS_A = "Read,Edit,Write"
+TOOLS_B = "mcp__lapp__lapp_read,mcp__lapp__lapp_edit,mcp__lapp__lapp_write"
 
-# Built-in tools available in Config A. Bash is included so the agent can
-# read directory structure; the edit path goes through Read/Edit/Write.
-TOOLS_A = "Read,Edit,Write,Bash"
+PROMPT_A = dedent("""\
+    Read the file shown below, apply the change, and save the result.
 
-# MCP tools available in Config B. Bash is included for the same reason.
-# NOTE: Claude Code names MCP tools as mcp__<server>__<tool_name>. If your
-# version uses a different convention, update these names to match what
-# `claude mcp list` shows when lapp is configured.
-TOOLS_B = "mcp__lapp__lapp_read,mcp__lapp__lapp_edit,mcp__lapp__lapp_write,mcp__lapp__lapp_grep,Bash"
+    Use ONLY the Read and Edit tools. Do not use any shell commands.
 
-# Prompt sent to the agent. Tool instructions are appended per-config so we
-# measure the tool interface itself, not tool-adoption behaviour.
-PROMPT_BASE = dedent("""\
-    You are a software engineer. Fix the GitHub issue described below.
+    File: {filepath}
 
-    Repository path: {work_dir}
-    Issue:
-    {problem_statement}
-
-    Rules:
-    - Edit only source files; do not modify test files.
-    - Do not add new test files.
-    - Stop as soon as the fix is complete. Do not explain or summarise.
+    Change to apply (unified diff — lines starting with - are removed, + are added):
+    {diff}
 """)
 
-PROMPT_SUFFIX_A = "Use the Read, Edit, and Write tools to modify files."
-PROMPT_SUFFIX_B = "Use lapp_read, lapp_edit, lapp_write, and lapp_grep to modify files."
+PROMPT_B = dedent("""\
+    Read the file shown below, apply the change, and save the result.
+
+    Use ONLY the lapp_read and lapp_edit tools. Do not use any shell commands.
+
+    File: {filepath}
+
+    Change to apply (unified diff — lines starting with - are removed, + are added):
+    {diff}
+""")
 
 
 # ---------------------------------------------------------------------------
-# Git helpers
+# Work directory
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=check)
+def setup_work_dir(instance_id: str, work_dir: Path) -> None:
+    """Copy pre-fetched files into work_dir, excluding the stored diff."""
+    src = FILES_DIR / instance_id
+    if not src.exists():
+        raise FileNotFoundError(
+            f"No files for {instance_id} — run prepare.py first"
+        )
+    for item in src.iterdir():
+        if item.name == "_patch.diff":
+            continue
+        dst = work_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, dst)
+        else:
+            shutil.copy2(item, dst)
 
 
-def clone_repo(repo: str, commit: str, work_dir: Path) -> None:
-    url = f"https://github.com/{repo}.git"
-    _run(["git", "clone", "--quiet", "--depth", "100", url, str(work_dir)])
-    _run(["git", "checkout", "--quiet", commit], cwd=work_dir)
+def reset_work_dir(instance_id: str, work_dir: Path) -> None:
+    """Restore work_dir to original state between Config A and Config B."""
+    shutil.rmtree(work_dir)
+    work_dir.mkdir()
+    setup_work_dir(instance_id, work_dir)
 
 
-def reset_repo(work_dir: Path) -> None:
-    """Restore the working tree to the last commit, remove untracked files."""
-    _run(["git", "restore", "."], cwd=work_dir)
-    _run(["git", "clean", "-fd", "--quiet"], cwd=work_dir)
-
-
-def capture_diff(work_dir: Path) -> str:
-    result = _run(["git", "diff"], cwd=work_dir, check=False)
-    return result.stdout
+def capture_diff(work_dir: Path, instance_id: str) -> str:
+    """Return a unified diff of every changed file in work_dir."""
+    src = FILES_DIR / instance_id
+    parts = []
+    for orig in src.rglob("*"):
+        if orig.name.startswith("_") or orig.is_dir():
+            continue
+        rel = orig.relative_to(src)
+        current = work_dir / rel
+        if not current.exists():
+            continue
+        result = subprocess.run(
+            ["diff", "-u",
+             "--label", f"a/{rel}",
+             "--label", f"b/{rel}",
+             str(orig), str(current)],
+            capture_output=True, text=True,
+        )
+        if result.stdout:
+            parts.append(result.stdout)
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
 # MCP config
 # ---------------------------------------------------------------------------
 
-def write_empty_mcp_config(path: Path) -> None:
-    """Empty MCP config used with --strict-mcp-config to block any globally
-    configured MCP servers from leaking into Config A runs."""
+def write_empty_mcp(path: Path) -> None:
     path.write_text('{"mcpServers": {}}')
 
 
-def write_lapp_mcp_config(lapp_binary: str, work_dir: Path, path: Path) -> None:
-    config = {
+def write_lapp_mcp(lapp_binary: str, work_dir: Path, path: Path) -> None:
+    path.write_text(json.dumps({
         "mcpServers": {
-            "lapp": {
-                "command": lapp_binary,
-                "args": ["--root", str(work_dir)],
-            }
+            "lapp": {"command": lapp_binary, "args": ["--root", str(work_dir)]}
         }
-    }
-    path.write_text(json.dumps(config))
+    }))
+
+
+# ---------------------------------------------------------------------------
+# Prompt construction
+# ---------------------------------------------------------------------------
+
+def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
+    diff_path = FILES_DIR / instance_id / "_patch.diff"
+    diff = diff_path.read_text() if diff_path.exists() else "(diff unavailable)"
+
+    # Find the primary changed file in the work dir. For multi-file patches
+    # both files are present; the diff already names them.
+    # We give the agent the work_dir root so it can resolve any path in the diff.
+    return template.format(filepath=str(work_dir), diff=diff)
 
 
 # ---------------------------------------------------------------------------
@@ -124,13 +156,6 @@ def run_claude(
     mcp_config_path: Path,
     work_dir: Path,
 ) -> dict:
-    """
-    Run `claude --print` with the given prompt and tool restrictions.
-
-    Returns a dict with at minimum:
-      output_tokens, input_tokens, cache_read_tokens, num_turns,
-      cost_usd, error (empty string on success).
-    """
     cmd = [
         "claude",
         "--print",
@@ -141,46 +166,60 @@ def run_claude(
         "--strict-mcp-config",
         "--mcp-config", str(mcp_config_path),
         "--allowedTools", allowed_tools,
-        prompt,
     ]
 
     try:
         proc = subprocess.run(
             cmd,
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=TIMEOUT,
             cwd=work_dir,
         )
     except subprocess.TimeoutExpired:
-        return _error_record(f"timeout after {TIMEOUT}s")
+        return _err(f"timeout after {TIMEOUT}s")
 
     if proc.returncode != 0:
-        # Claude exits non-zero on hard errors; stderr has details.
-        return _error_record(proc.stderr[:400].strip() or f"exit {proc.returncode}")
+        detail = (proc.stderr[:300] or proc.stdout[:300]).strip()
+        return _err(detail or f"exit {proc.returncode}")
 
     try:
         raw = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return _error_record(f"non-JSON output: {proc.stdout[:200]}")
+        return _err(f"non-JSON output: {proc.stdout[:200]}")
 
-    if raw.get("is_error") or raw.get("subtype") == "error":
-        return _error_record(raw.get("result", "unknown error")[:200])
+    if raw.get("is_error"):
+        subtype = raw.get("subtype", "")
+        # error_max_turns: preserve partial token data so the run appears in the report.
+        if subtype == "error_max_turns":
+            usage = raw.get("usage", {})
+            return {
+                "output_tokens":       usage.get("output_tokens", 0),
+                "input_tokens":        usage.get("input_tokens", 0),
+                "cache_read_tokens":   usage.get("cache_read_input_tokens", 0),
+                "cache_create_tokens": usage.get("cache_creation_input_tokens", 0),
+                "num_turns":           raw.get("num_turns", 0),
+                "cost_usd":            raw.get("total_cost_usd", 0.0),
+                "stop_reason":         subtype,
+                "error":               "max_turns",
+            }
+        return _err(raw.get("result", "unknown")[:200])
 
     usage = raw.get("usage", {})
     return {
-        "output_tokens":      usage.get("output_tokens", 0),
-        "input_tokens":       usage.get("input_tokens", 0),
-        "cache_read_tokens":  usage.get("cache_read_input_tokens", 0),
+        "output_tokens":       usage.get("output_tokens", 0),
+        "input_tokens":        usage.get("input_tokens", 0),
+        "cache_read_tokens":   usage.get("cache_read_input_tokens", 0),
         "cache_create_tokens": usage.get("cache_creation_input_tokens", 0),
-        "num_turns":          raw.get("num_turns", 0),
-        "cost_usd":           raw.get("total_cost_usd", 0.0),
-        "stop_reason":        raw.get("stop_reason", ""),
-        "error":              "",
+        "num_turns":           raw.get("num_turns", 0),
+        "cost_usd":            raw.get("total_cost_usd", 0.0),
+        "stop_reason":         raw.get("stop_reason", ""),
+        "error":               "",
     }
 
 
-def _error_record(msg: str) -> dict:
+def _err(msg: str) -> dict:
     return {
         "output_tokens": 0, "input_tokens": 0,
         "cache_read_tokens": 0, "cache_create_tokens": 0,
@@ -196,52 +235,42 @@ def _error_record(msg: str) -> dict:
 def run_instance(instance: dict, lapp_binary: str) -> dict:
     iid = instance["instance_id"]
 
-    with tempfile.TemporaryDirectory(prefix=f"lapp-bench-{iid}-") as tmp:
+    with tempfile.TemporaryDirectory(prefix=f"lapp-bench-") as tmp:
         tmp_path = Path(tmp)
-        work_dir = tmp_path / "repo"
+        work_dir = (tmp_path / "work").resolve()
+        work_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"    cloning {instance['repo']} @ {instance['base_commit'][:8]}")
         try:
-            clone_repo(instance["repo"], instance["base_commit"], work_dir)
-        except subprocess.CalledProcessError as exc:
-            return {"instance_id": iid, "error": f"clone failed: {exc.stderr[:200]}"}
+            setup_work_dir(iid, work_dir)
+        except FileNotFoundError as exc:
+            return {"instance_id": iid, "error": str(exc)}
 
-        base_prompt = PROMPT_BASE.format(
-            work_dir=work_dir,
-            problem_statement=instance["problem_statement"],
-        )
+        empty_mcp = tmp_path / "empty.json"
+        write_empty_mcp(empty_mcp)
+
+        lapp_mcp = tmp_path / "lapp.json"
+        write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
 
         # Config A — standard tools
-        empty_mcp = tmp_path / "empty_mcp.json"
-        write_empty_mcp_config(empty_mcp)
+        print(f"    [A] Read → Edit", flush=True)
+        prompt_a = build_prompt(PROMPT_A, work_dir, iid)
+        result_a = run_claude(prompt_a, TOOLS_A, empty_mcp, work_dir)
+        diff_a = capture_diff(work_dir, iid)
 
-        print(f"    [A] standard tools (Read/Edit/Write)")
-        result_a = run_claude(
-            prompt=base_prompt + "\n" + PROMPT_SUFFIX_A,
-            allowed_tools=TOOLS_A,
-            mcp_config_path=empty_mcp,
-            work_dir=work_dir,
-        )
-        diff_a = capture_diff(work_dir)
-
-        reset_repo(work_dir)
+        reset_work_dir(iid, work_dir)
+        # lapp MCP config points at work_dir; re-write after reset so the path
+        # is still valid (same path, same dir, so this is a no-op in practice).
+        write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
 
         # Config B — lapp tools
-        lapp_mcp = tmp_path / "lapp_mcp.json"
-        write_lapp_mcp_config(lapp_binary, work_dir, lapp_mcp)
-
-        print(f"    [B] lapp tools (lapp_read/lapp_edit)")
-        result_b = run_claude(
-            prompt=base_prompt + "\n" + PROMPT_SUFFIX_B,
-            allowed_tools=TOOLS_B,
-            mcp_config_path=lapp_mcp,
-            work_dir=work_dir,
-        )
-        diff_b = capture_diff(work_dir)
+        print(f"    [B] lapp_read → lapp_edit", flush=True)
+        prompt_b = build_prompt(PROMPT_B, work_dir, iid)
+        result_b = run_claude(prompt_b, TOOLS_B, lapp_mcp, work_dir)
+        diff_b = capture_diff(work_dir, iid)
 
     return {
-        "instance_id": iid,
-        "repo": instance["repo"],
+        "instance_id":     iid,
+        "repo":            instance["repo"],
         "reference_patch": instance["patch"],
         "a": {**result_a, "diff": diff_a},
         "b": {**result_b, "diff": diff_b},
@@ -254,37 +283,30 @@ def run_instance(instance: dict, lapp_binary: str) -> dict:
 
 def main() -> None:
     if not INSTANCES_FILE.exists():
-        print(
-            f"ERROR: {INSTANCES_FILE} not found.\n"
-            "Run 'python benchmark/select.py' first to populate it.",
-            file=sys.stderr,
-        )
+        print(f"ERROR: instances.json not found — run fetch_instances.py first.",
+              file=sys.stderr)
         sys.exit(1)
 
     instances: list[dict] = json.loads(INSTANCES_FILE.read_text())
     if not instances:
-        print("ERROR: instances.json is empty — run select.py first.", file=sys.stderr)
+        print("ERROR: instances.json is empty — run fetch_instances.py first.",
+              file=sys.stderr)
         sys.exit(1)
 
     lapp_binary = shutil.which("lapp")
     if not lapp_binary:
-        print(
-            "ERROR: lapp binary not found in PATH.\n"
-            "Run: go install ./cmd/lapp",
-            file=sys.stderr,
-        )
+        print("ERROR: lapp not in PATH — run: go install ./cmd/lapp",
+              file=sys.stderr)
         sys.exit(1)
 
-    # Optional: run a subset by setting BENCHMARK_IDS=id1,id2
     filter_ids = {s for s in os.environ.get("BENCHMARK_IDS", "").split(",") if s}
     if filter_ids:
         instances = [i for i in instances if i["instance_id"] in filter_ids]
-        print(f"Subset mode: {len(instances)} instance(s)")
+        print(f"Subset: {len(instances)} instance(s)")
     else:
         print(f"Running {len(instances)} instance(s)")
 
     skip_existing = os.environ.get("SKIP_EXISTING", "1") != "0"
-
     RESULTS_DIR.mkdir(exist_ok=True)
 
     for idx, instance in enumerate(instances, 1):
@@ -292,17 +314,20 @@ def main() -> None:
         out_path = RESULTS_DIR / f"{iid}.json"
 
         if skip_existing and out_path.exists():
-            print(f"  [{idx}/{len(instances)}] {iid}  (skipped — already done)")
+            print(f"  [{idx}/{len(instances)}] {iid}  (skipped)")
             continue
 
         print(f"  [{idx}/{len(instances)}] {iid}")
         result = run_instance(instance, lapp_binary)
         out_path.write_text(json.dumps(result, indent=2))
 
-        # Print a one-line summary so the user can follow along.
+        if "error" in result and "a" not in result:
+            print(f"           ERROR: {result['error']}")
+            continue
+
         a, b = result.get("a", {}), result.get("b", {})
-        if a.get("error") or b.get("error"):
-            err = a.get("error") or b.get("error")
+        err = a.get("error") or b.get("error")
+        if err:
             print(f"           ERROR: {err}")
         else:
             delta = b["output_tokens"] - a["output_tokens"]
@@ -310,11 +335,11 @@ def main() -> None:
             print(
                 f"           A={a['output_tokens']} out-tok  "
                 f"B={b['output_tokens']} out-tok  "
-                f"delta={sign}{delta}"
+                f"Δ={sign}{delta}"
             )
 
-    print(f"\nResults written to {RESULTS_DIR}/")
-    print("Run 'python benchmark/report.py' to see the comparison table.")
+    print(f"\nResults in {RESULTS_DIR}/")
+    print("Run 'python benchmark/report.py' to see the table.")
 
 
 if __name__ == "__main__":
