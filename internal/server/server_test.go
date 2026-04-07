@@ -123,6 +123,20 @@ func extractText(t *testing.T, r *mcp.CallToolResult) string {
 	return ""
 }
 
+// extractTextNoFail is a goroutine-safe variant of extractText that returns
+// an empty string instead of calling t.Fatalf when no text content is found.
+func extractTextNoFail(r *mcp.CallToolResult) string {
+	if r == nil {
+		return ""
+	}
+	for _, c := range r.Content {
+		if tc, ok := c.(mcp.TextContent); ok {
+			return tc.Text
+		}
+	}
+	return ""
+}
+
 // parseHashRef extracts the first "N#XX" ref from a formatted line like "N#XX:content".
 func parseHashRef(line string) string {
 	re := regexp.MustCompile(`(\d+#[ZPMQVRWSNKTXJBYH]{2})`)
@@ -622,69 +636,113 @@ func TestNoOpLeavesNoTempFile(t *testing.T) {
 	}
 
 	// No *.lapp.tmp files should exist anywhere in the root.
-	found := false
-	_ = filepath.WalkDir(cfg.Root, func(p string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".lapp.tmp") {
+	var found bool
+	if walkErr := filepath.WalkDir(cfg.Root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries; walk continues
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".lapp.tmp") {
 			found = true
 		}
 		return nil
-	})
+	}); walkErr != nil {
+		t.Logf("WalkDir error during orphan check (non-fatal): %v", walkErr)
+	}
 	if found {
 		t.Error("found orphaned .lapp.tmp file after ERR_NO_OP")
 	}
 }
 
-// TestConcurrentEditsSerializedByLock verifies that two concurrent handleEdit
-// calls on the same file do not corrupt it: one succeeds, the other gets
-// ERR_LOCKED (non-blocking), and the final file content is coherent.
+// TestConcurrentEditsSerializedByLock verifies that two concurrent read→edit
+// cycles on the same file do not corrupt it and that at least one succeeds.
 func TestConcurrentEditsSerializedByLock(t *testing.T) {
 	cfg := newTestConfig(t)
 	s := New(cfg)
 	filePath := filepath.Join(cfg.Root, "concurrent.go")
 	writeTestFile(t, filePath, "original\n")
 
-	// Both goroutines try to edit line 1. Only one can hold the lock.
-	type result struct{ out string }
+	type result struct {
+		out string
+		err string
+	}
 	ch := make(chan result, 2)
 
-	edit := func() {
-		readOut := callRead(t, s, filePath, 0, 0)
+	// editOnce performs a full read→edit cycle and sends the outcome.
+	// Does NOT call t.Fatalf — goroutine-safe.
+	editOnce := func() {
+		args := map[string]any{"path": filePath}
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = args
+		readResult, err := s.handleRead(context.Background(), req)
+		if err != nil || readResult == nil {
+			ch <- result{err: fmt.Sprintf("read error: %v", err)}
+			return
+		}
+		text := extractTextNoFail(readResult)
 		ref := ""
-		for _, l := range strings.Split(strings.TrimSpace(readOut), "\n") {
+		for _, l := range strings.Split(strings.TrimSpace(text), "\n") {
 			if strings.HasPrefix(l, "1#") {
 				ref = parseHashRef(l)
 				break
 			}
 		}
 		if ref == "" {
-			ch <- result{"no ref"}
+			ch <- result{err: "no ref parsed"}
 			return
 		}
-		out := callEdit(t, s, filePath, []editor.Edit{
+		edits := []editor.Edit{
 			{Type: editor.EditReplace, Anchor: ref, Content: strPtr("replaced")},
-		})
-		ch <- result{out}
+		}
+		editsJSON, _ := json.Marshal(edits)
+		var editsAny []any
+		json.Unmarshal(editsJSON, &editsAny)
+		editReq := mcp.CallToolRequest{}
+		editReq.Params.Arguments = map[string]any{"path": filePath, "edits": editsAny}
+		editResult, err := s.handleEdit(context.Background(), editReq)
+		if err != nil {
+			ch <- result{err: fmt.Sprintf("edit error: %v", err)}
+			return
+		}
+		ch <- result{out: extractTextNoFail(editResult)}
 	}
 
-	go edit()
-	go edit()
+	go editOnce()
+	go editOnce()
 
 	r1 := <-ch
 	r2 := <-ch
 
-	// One must succeed ("OK:"), the other must get ERR_LOCKED or succeed.
-	// Neither should produce a garbled/empty result.
-	for _, r := range []result{r1, r2} {
-		if r.out == "" || r.out == "no ref" {
-			t.Errorf("unexpected empty result")
+	// Neither goroutine should have had an infrastructure error.
+	if r1.err != "" {
+		t.Errorf("goroutine 1 error: %s", r1.err)
+	}
+	if r2.err != "" {
+		t.Errorf("goroutine 2 error: %s", r2.err)
+	}
+
+	// At least one must have succeeded; the other gets ERR_LOCKED or also succeeds
+	// (if the first completed its full cycle before the second acquired the lock).
+	outcomes := []string{r1.out, r2.out}
+	successCount := 0
+	for _, o := range outcomes {
+		if strings.Contains(o, "OK:") {
+			successCount++
 		}
 	}
-	// File must still be readable and contain coherent content.
+	if successCount == 0 {
+		t.Errorf("expected at least one successful edit, got: %q / %q", r1.out, r2.out)
+	}
+
+	// File must be readable and non-empty with coherent content.
 	raw, err := os.ReadFile(filePath)
 	if err != nil {
 		t.Fatalf("file unreadable after concurrent edits: %v", err)
 	}
 	if len(raw) == 0 {
-		t.Error("file is empty after concurrent edits — corruption")
+		t.Error("file is empty — corruption")
+	}
+	content := strings.TrimSpace(string(raw))
+	if content != "original" && content != "replaced" {
+		t.Errorf("unexpected content %q — expected 'original' or 'replaced'", content)
 	}
 }

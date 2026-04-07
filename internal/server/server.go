@@ -281,9 +281,9 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		os.Remove(tmpPath)
 		return mcp.NewToolResultError("cannot set file permissions: " + chmodErr.Error()), nil
 	}
-	if renameErr := os.Rename(tmpPath, canonical); renameErr != nil {
+	if errCode := fileio.RenameAtomic(tmpPath, canonical); errCode != "" {
 		os.Remove(tmpPath)
-		return mcp.NewToolResultError("cannot rename temp file: " + renameErr.Error()), nil
+		return mcp.NewToolResultError(errCode), nil
 	}
 
 	lines := strings.Count(content, "\n")
@@ -323,6 +323,11 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		if f, ok2 := v.(float64); ok2 && f >= 0 {
 			ctxLines = int(f)
 		}
+	}
+
+	const maxCtxLines = 10
+	if ctxLines > maxCtxLines {
+		ctxLines = maxCtxLines
 	}
 
 	re, err := regexp.Compile(pattern)

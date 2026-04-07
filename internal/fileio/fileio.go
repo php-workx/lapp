@@ -204,7 +204,7 @@ func WriteFile(fd *FileData, newLines []string) string {
 		return ErrWriteFailed
 	}
 
-	if errCode := renameAtomic(tempPath, fd.CanonicalPath); errCode != "" {
+	if errCode := RenameAtomic(tempPath, fd.CanonicalPath); errCode != "" {
 		os.Remove(tempPath)
 		return errCode
 	}
