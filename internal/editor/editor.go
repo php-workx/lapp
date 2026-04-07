@@ -152,12 +152,18 @@ func ValidateEdits(edits []Edit, lines []string) ([]parsedEdit, string, string) 
 	}
 
 	if len(mismatches) > 0 {
-		// ERR_LINE_OUT_OF_RANGE takes priority: the referenced line doesn't exist,
-		// so the remapping table would be meaningless. Model must re-read.
+		// ERR_LINE_OUT_OF_RANGE takes priority over ERR_HASH_MISMATCH.
+		// Collect ALL out-of-range lines so the model can fix them in one retry.
+		var outOfRange []string
 		for _, m := range mismatches {
 			if m.OutOfRange {
-				return nil, ErrLineOutOfRange, fmt.Sprintf("line %d is out of range (file has %d lines); re-read the file to get current line numbers", m.Line, len(lines))
+				outOfRange = append(outOfRange, fmt.Sprintf("%d", m.Line))
 			}
+		}
+		if len(outOfRange) > 0 {
+			return nil, ErrLineOutOfRange, fmt.Sprintf(
+				"line(s) %s out of range (file has %d lines); re-read the file to get current line numbers",
+				strings.Join(outOfRange, ", "), len(lines))
 		}
 		// All mismatches are hash-only: file content changed. Provide remapping.
 		return nil, ErrHashMismatch, FormatMismatchError(mismatches, lines)
@@ -383,6 +389,12 @@ func FormatMismatchError(mismatches []RefMismatch, lines []string) string {
 	// Remapping table.
 	sb.WriteString("\nStale → Current:\n")
 	for _, m := range mismatches {
+		if m.OutOfRange {
+			// No current hash exists for a line beyond EOF — print actionable guidance.
+			sb.WriteString(fmt.Sprintf("  %d#%s → (line %d does not exist — re-read the file)\n",
+				m.Line, m.Expected, m.Line))
+			continue
+		}
 		var content string
 		if m.Line >= 1 && m.Line <= len(lines) {
 			content = lines[m.Line-1]
@@ -577,6 +589,22 @@ func splice(lines []string, start, end int, replacement []string) []string {
 func generateDiff(original, updated []string, path string) (string, int) {
 	const ctxLines = 2
 
+	// Guard: LCS has O(n×m) memory cost. For large files, fall back to a simple
+	// positional diff that avoids allocation.
+	const maxLCSLines = 5000
+	if len(original) > maxLCSLines || len(updated) > maxLCSLines {
+		// Count positions that differ (positional heuristic, not true LCS).
+		shorter := min(len(original), len(updated))
+		changed := 0
+		for i := 0; i < shorter; i++ {
+			if original[i] != updated[i] {
+				changed++
+			}
+		}
+		changed += abs(len(original) - len(updated))
+		return fmt.Sprintf("--- a/%s\n+++ b/%s\n[diff omitted: file exceeds %d-line LCS limit]\n", path, path, maxLCSLines), changed
+	}
+
 	ops := lcs(original, updated)
 
 	// Group ops into index-pair hunks [start, end).
@@ -723,4 +751,11 @@ func lcs(a, b []string) []editOp {
 		ops[l], ops[r] = ops[r], ops[l]
 	}
 	return ops
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

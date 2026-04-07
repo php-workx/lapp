@@ -9,10 +9,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// renameAtomic renames src to dst on Windows via MoveFileExW.
+// RenameAtomic renames src to dst on Windows via MoveFileExW.
 // Detects sharing violations (another process has the file open) and returns
 // an actionable message per §9.1 rather than a raw OS error string.
-func renameAtomic(src, dst string) string {
+// Returns an empty string on success, or an error code on failure.
+func RenameAtomic(src, dst string) string {
 	if err := os.Rename(src, dst); err != nil {
 		var winErr *os.PathError
 		if errors.As(err, &winErr) {
