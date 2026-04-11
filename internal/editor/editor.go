@@ -123,6 +123,20 @@ func splitContent(content string) []string {
 	return parts
 }
 
+// normalizeRef accepts refs copied directly from lapp_read/lapp_grep output,
+// which are displayed as LINE#HASH:CONTENT. lapp_edit expects LINE#HASH, so
+// trim a single trailing colon when the ref contains a hash component. Keep
+// special anchors 0: and EOF: unchanged.
+func normalizeRef(ref string) string {
+	if ref == "0:" || ref == "EOF:" {
+		return ref
+	}
+	if strings.Contains(ref, "#") && strings.HasSuffix(ref, ":") {
+		return strings.TrimSuffix(ref, ":")
+	}
+	return ref
+}
+
 // ValidateEdits checks field combinations, parses all refs, and verifies hashes.
 // Returns (parsedEdits, errCode, errDetail). errCode=="" on success.
 func ValidateEdits(edits []Edit, lines []string) ([]parsedEdit, string, string) {
@@ -146,7 +160,7 @@ func ValidateEdits(edits []Edit, lines []string) ([]parsedEdit, string, string) 
 	// Second pass: verify all hashes. We do this after structural validation
 	// so structural errors (field combos) get priority over stale refs.
 	for i, pe := range parsed {
-		e := edits[i]
+		e := pe.edit
 		mms := verifyHashes(i, e, pe, lines)
 		mismatches = append(mismatches, mms...)
 	}
@@ -193,6 +207,7 @@ func validateOne(idx int, e Edit, lines []string) (parsedEdit, string, string) {
 		if e.Content == nil || *e.Content == "" {
 			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: %s requires non-empty content", idx, e.Type)
 		}
+		e.Anchor = normalizeRef(e.Anchor)
 		lineNum, _, err := hashline.ParseRef(e.Anchor)
 		if err != nil {
 			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: invalid anchor ref %q: %v", idx, e.Anchor, err)
@@ -227,6 +242,7 @@ func parseAddressing(idx int, e Edit, lines []string, _ bool) (parsedEdit, strin
 		if e.Start != "" || e.End != "" {
 			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: cannot use anchor together with start/end", idx)
 		}
+		e.Anchor = normalizeRef(e.Anchor)
 		lineNum, _, err := hashline.ParseRef(e.Anchor)
 		if err != nil {
 			return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: invalid anchor ref %q: %v", idx, e.Anchor, err)
@@ -242,6 +258,8 @@ func parseAddressing(idx int, e Edit, lines []string, _ bool) (parsedEdit, strin
 	if e.Start == "" || e.End == "" {
 		return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: requires anchor or both start+end", idx)
 	}
+	e.Start = normalizeRef(e.Start)
+	e.End = normalizeRef(e.End)
 	startLine, _, err := hashline.ParseRef(e.Start)
 	if err != nil {
 		return parsedEdit{}, ErrInvalidEdit, fmt.Sprintf("edit[%d]: invalid start ref %q: %v", idx, e.Start, err)
@@ -464,6 +482,7 @@ func ApplyEdits(fd *fileio.FileData, req *EditRequest) ([]string, *EditResult, s
 				continue
 			}
 			hasAnyRef = true
+			r = normalizeRef(r)
 			if _, _, err := hashline.ParseRef(r); err == nil {
 				hasValidHashlineRef = true
 			}
