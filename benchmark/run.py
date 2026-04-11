@@ -32,7 +32,7 @@ from textwrap import dedent
 
 BENCHMARK_DIR = Path(__file__).parent
 FILES_DIR     = BENCHMARK_DIR / "files"
-RESULTS_DIR   = BENCHMARK_DIR / "results"
+RESULTS_DIR   = BENCHMARK_DIR / "results" / os.environ.get("RESULTS_SUBDIR", "default")
 INSTANCES_FILE = BENCHMARK_DIR / "instances.json"
 
 TIMEOUT   = 300   # seconds per agent run; read+edit of a small file is fast
