@@ -12,16 +12,24 @@ Metrics reported per instance:
 Aggregate row shows totals for tokens/cost and weighted-average similarity.
 
 Usage:
-  python benchmark/report.py             # all results
-  python benchmark/report.py id1 id2    # specific instances
+  python benchmark/report.py                  # default results dir
+  python benchmark/report.py --dir minimax    # results/minimax subdir
+  python benchmark/report.py id1 id2          # specific instances
 """
 
 import difflib
 import json
+import os
 import sys
 from pathlib import Path
 
-RESULTS_DIR = Path(__file__).parent / "results"
+_base = Path(__file__).parent / "results"
+RESULTS_DIR = _base / os.environ.get("RESULTS_SUBDIR", "default")
+# --dir <name> overrides RESULTS_SUBDIR
+if "--dir" in sys.argv:
+    idx = sys.argv.index("--dir")
+    RESULTS_DIR = _base / sys.argv[idx + 1]
+    sys.argv = sys.argv[:idx] + sys.argv[idx + 2:]
 
 
 # ---------------------------------------------------------------------------
