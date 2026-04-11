@@ -294,6 +294,38 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	return mcp.NewToolResultText(fmt.Sprintf("OK: created %s (%d lines)", path, lines)), nil
 }
 
+var literalRegexEscapeReplacer = strings.NewReplacer(
+	`\[`, `[`,
+	`\]`, `]`,
+	`\(`, `(`,
+	`\)`, `)`,
+	`\.`, `.`,
+	`\+`, `+`,
+	`\*`, `*`,
+	`\?`, `?`,
+	`\{`, `{`,
+	`\}`, `}`,
+	`\|`, `|`,
+	`\^`, `^`,
+	`\$`, `$`,
+	`\:`, `:`,
+	`\-`, `-`,
+	`\/`, `/`,
+	`\,`, `,`,
+	`\=`, `=`,
+	`\"`, `"`,
+	`\'`, `'`,
+)
+
+func literalVariants(pattern string) []string {
+	variants := []string{pattern}
+	deescaped := literalRegexEscapeReplacer.Replace(pattern)
+	if deescaped != pattern {
+		variants = append(variants, deescaped)
+	}
+	return variants
+}
+
 func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	pattern, err := req.RequireString("pattern")
 	if err != nil {
@@ -331,17 +363,19 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		ctxLines = maxCtxLines
 	}
 
-	// literal=true: escape metacharacters so the pattern matches as a fixed string.
-	// This is the safe default for searching code content that contains regex syntax.
-	searchPat := pattern
+	literal := false
 	if v, ok := args["literal"]; ok {
 		if b, ok2 := v.(bool); ok2 && b {
-			searchPat = regexp.QuoteMeta(pattern)
+			literal = true
 		}
 	}
-	re, err := regexp.Compile(searchPat)
-	if err != nil {
-		return mcp.NewToolResultError("invalid pattern: " + err.Error()), nil
+
+	var re *regexp.Regexp
+	if !literal {
+		re, err = regexp.Compile(pattern)
+		if err != nil {
+			return mcp.NewToolResultError("invalid pattern: " + err.Error()), nil
+		}
 	}
 
 	const maxGrepFiles = 100
@@ -384,9 +418,21 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 
 		lines := fd.Lines
 		var matches []int
-		for i, line := range lines {
-			if re.MatchString(line) {
-				matches = append(matches, i+1)
+		if literal {
+			variants := literalVariants(pattern)
+			for i, line := range lines {
+				for _, v := range variants {
+					if strings.Contains(line, v) {
+						matches = append(matches, i+1)
+						break
+					}
+				}
+			}
+		} else {
+			for i, line := range lines {
+				if re.MatchString(line) {
+					matches = append(matches, i+1)
+				}
 			}
 		}
 		if len(matches) == 0 {
