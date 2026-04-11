@@ -20,6 +20,7 @@ Usage:
     SKIP_EXISTING=0 python benchmark/run.py           # re-run all
 """
 
+import copy
 import json
 import os
 import shutil
@@ -37,11 +38,18 @@ INSTANCES_FILE = BENCHMARK_DIR / "instances.json"
 TIMEOUT   = 300   # seconds per agent run; read+edit of a small file is fast
 MAX_TURNS = 20    # upper bound; lapp may need extra turns on first read+edit attempts
 
-# Tools available in each config. Bash excluded intentionally — we want the
-# agent to go through the tool interface, not shell out to sed/awk.
+# Agent selection: AGENT=claude (default) or AGENT=opencode
+AGENT = os.environ.get("AGENT", "claude")
+
+# OpenCode model to use (any model string opencode accepts)
+OPENCODE_MODEL  = os.environ.get("OPENCODE_MODEL", "opencode/gpt-5-nano")
+OPENCODE_CONFIG = Path.home() / ".config/opencode/opencode.json"
+
+# Claude tool names (--allowedTools values)
 TOOLS_A = "Read,Edit,Write"
 TOOLS_B = "lapp_read,lapp_edit,lapp_write,lapp_grep"
 
+# ---- Claude prompts ----
 PROMPT_A = dedent("""\
     Read the file shown below, apply the change, and save the result.
 
@@ -62,6 +70,32 @@ PROMPT_B = dedent("""\
     Do not use any shell commands.
 
     File: {filepath}
+
+    Change to apply (unified diff — lines starting with - are removed, + are added):
+    {diff}
+""")
+
+# ---- OpenCode prompts (tool names differ: lowercase, lapp exposed as lapp_lapp_*) ----
+PROMPT_A_OC = dedent("""\
+    Read the file shown below, apply the change, and save the result.
+
+    Use ONLY the read and edit tools. Do not use bash or any shell commands.
+
+    Repository root: {filepath}
+
+    Change to apply (unified diff — lines starting with - are removed, + are added):
+    {diff}
+""")
+
+PROMPT_B_OC = dedent("""\
+    Apply the change shown below to the file at the given path.
+
+    Preferred workflow: use lapp_lapp_grep to locate the exact LINE#HASH reference
+    for the line(s) being changed, then lapp_lapp_edit to apply the change.
+    Only use lapp_lapp_read if you need broader context.
+    Do not use bash or any shell commands.
+
+    Repository root: {filepath}
 
     Change to apply (unified diff — lines starting with - are removed, + are added):
     {diff}
@@ -148,6 +182,113 @@ def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
     # We give the agent the work_dir root so it can resolve any path in the diff.
     return template.format(filepath=str(work_dir), diff=diff)
 
+
+
+# ---------------------------------------------------------------------------
+# OpenCode config helpers
+# ---------------------------------------------------------------------------
+
+def _oc_config(lapp_binary: str | None, work_dir: Path | None) -> str:
+    """
+    Return opencode config JSON, merging lapp MCP into the user's existing config.
+    If lapp_binary is None, returns the base config unchanged (Config A).
+    """
+    base = json.loads(OPENCODE_CONFIG.read_text()) if OPENCODE_CONFIG.exists() else {}
+    if lapp_binary is None:
+        return json.dumps(base)
+    cfg = copy.deepcopy(base)
+    cfg.setdefault("mcp", {})["lapp"] = {
+        "type": "local",
+        "command": [lapp_binary, "--root", str(work_dir)],
+        "enabled": True,
+    }
+    return json.dumps(cfg)
+
+
+# ---------------------------------------------------------------------------
+# OpenCode runner
+# ---------------------------------------------------------------------------
+
+def run_opencode(
+    prompt: str,
+    lapp_binary: str | None,   # None = Config A (no lapp)
+    work_dir: Path,
+) -> dict:
+    """
+    Run opencode run --format json with the prompt on stdin.
+
+    Config A: base opencode config (no lapp).
+    Config B: base config merged with lapp MCP.
+    Tool restriction is prompt-driven (no --allowedTools equivalent in opencode).
+    """
+    env = {**os.environ, "OPENCODE_CONFIG_CONTENT": _oc_config(lapp_binary, work_dir)}
+    cmd = [
+        "opencode", "run",
+        "--format", "json",
+        "--model", OPENCODE_MODEL,
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+            cwd=work_dir,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return _err(f"timeout after {TIMEOUT}s")
+
+    # Parse the event stream. Each line is a JSON event.
+    output_tokens = input_tokens = cache_read = cache_write = num_turns = 0
+    cost = 0.0
+    tools_used: list[str] = []
+    last_error = ""
+
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            t = obj.get("type", "")
+            part = obj.get("part", {})
+            if t == "tool_use":
+                tools_used.append(part.get("tool", "?"))
+            elif t == "step_finish":
+                tok = part.get("tokens", {})
+                output_tokens += tok.get("output", 0)
+                input_tokens  += tok.get("input", 0)
+                cache_read    += tok.get("cache", {}).get("read", 0)
+                cache_write   += tok.get("cache", {}).get("write", 0)
+                cost          += part.get("cost", 0.0)
+                num_turns     += 1
+            elif t == "error":
+                err_data = obj.get("error", {})
+                last_error = str(err_data.get("data", {}).get("message", err_data))[:200]
+        except json.JSONDecodeError:
+            pass
+
+    if last_error and output_tokens == 0:
+        return _err(last_error)
+
+    if proc.returncode != 0 and output_tokens == 0:
+        detail = (proc.stderr[:300] or proc.stdout[:300]).strip()
+        return _err(detail or f"exit {proc.returncode}")
+
+    return {
+        "output_tokens":       output_tokens,
+        "input_tokens":        input_tokens,
+        "cache_read_tokens":   cache_read,
+        "cache_create_tokens": cache_write,
+        "num_turns":           num_turns,
+        "cost_usd":            cost,
+        "stop_reason":         "end_turn",
+        "tools_used":          tools_used,  # extra: lets report show which tools ran
+        "error":               "",
+    }
 
 # ---------------------------------------------------------------------------
 # Agent runner
@@ -238,7 +379,7 @@ def _err(msg: str) -> dict:
 def run_instance(instance: dict, lapp_binary: str) -> dict:
     iid = instance["instance_id"]
 
-    with tempfile.TemporaryDirectory(prefix=f"lapp-bench-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="lapp-bench-") as tmp:
         tmp_path = Path(tmp)
         work_dir = (tmp_path / "work").resolve()
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -248,28 +389,40 @@ def run_instance(instance: dict, lapp_binary: str) -> dict:
         except FileNotFoundError as exc:
             return {"instance_id": iid, "error": str(exc)}
 
-        empty_mcp = tmp_path / "empty.json"
-        write_empty_mcp(empty_mcp)
+        if AGENT == "opencode":
+            # OpenCode: config injection via OPENCODE_CONFIG_CONTENT; no --allowedTools.
+            # Config A = base config (no lapp).  Config B = base + lapp merged in.
+            print(f"    [A] read → edit  (opencode/{OPENCODE_MODEL})", flush=True)
+            prompt_a = build_prompt(PROMPT_A_OC, work_dir, iid)
+            result_a = run_opencode(prompt_a, None, work_dir)
+            diff_a   = capture_diff(work_dir, iid)
 
-        lapp_mcp = tmp_path / "lapp.json"
-        write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
+            reset_work_dir(iid, work_dir)
 
-        # Config A — standard tools
-        print(f"    [A] Read → Edit", flush=True)
-        prompt_a = build_prompt(PROMPT_A, work_dir, iid)
-        result_a = run_claude(prompt_a, TOOLS_A, empty_mcp, work_dir)
-        diff_a = capture_diff(work_dir, iid)
+            print(f"    [B] lapp_lapp_grep → lapp_lapp_edit  (opencode/{OPENCODE_MODEL})", flush=True)
+            prompt_b = build_prompt(PROMPT_B_OC, work_dir, iid)
+            result_b = run_opencode(prompt_b, lapp_binary, work_dir)
+            diff_b   = capture_diff(work_dir, iid)
 
-        reset_work_dir(iid, work_dir)
-        # lapp MCP config points at work_dir; re-write after reset so the path
-        # is still valid (same path, same dir, so this is a no-op in practice).
-        write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
+        else:
+            # Claude Code: --allowedTools + --strict-mcp-config for clean isolation.
+            empty_mcp = tmp_path / "empty.json"
+            write_empty_mcp(empty_mcp)
+            lapp_mcp  = tmp_path / "lapp.json"
+            write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
 
-        # Config B — lapp tools
-        print(f"    [B] lapp_read → lapp_edit", flush=True)
-        prompt_b = build_prompt(PROMPT_B, work_dir, iid)
-        result_b = run_claude(prompt_b, TOOLS_B, lapp_mcp, work_dir)
-        diff_b = capture_diff(work_dir, iid)
+            print(f"    [A] Read → Edit  (claude)", flush=True)
+            prompt_a = build_prompt(PROMPT_A, work_dir, iid)
+            result_a = run_claude(prompt_a, TOOLS_A, empty_mcp, work_dir)
+            diff_a   = capture_diff(work_dir, iid)
+
+            reset_work_dir(iid, work_dir)
+            write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
+
+            print(f"    [B] lapp_read → lapp_edit  (claude)", flush=True)
+            prompt_b = build_prompt(PROMPT_B, work_dir, iid)
+            result_b = run_claude(prompt_b, TOOLS_B, lapp_mcp, work_dir)
+            diff_b   = capture_diff(work_dir, iid)
 
     return {
         "instance_id":     iid,
