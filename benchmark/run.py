@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from textwrap import dedent
 
@@ -51,54 +52,46 @@ TOOLS_B = "lapp_read,lapp_edit,lapp_write,lapp_grep"
 
 # ---- Claude prompts ----
 PROMPT_A = dedent("""\
-    You are fixing a bug in a software repository.
+    Apply the following change to the file. Read the file first to locate the
+    exact content, make the replacement, save it.
+    Use ONLY the Read and Edit tools. No shell commands.
 
-    Repository files are at: {filepath}
-    Issue to fix:
-    {task}
+    Repository root: {filepath}
 
-    Read the relevant file(s), understand what needs to change, make the fix,
-    and save the result. Use ONLY the Read and Edit tools. No shell commands.
+    {changes}
 """)
 
 PROMPT_B = dedent("""\
-    You are fixing a bug in a software repository.
-
-    Repository files are at: {filepath}
-    Issue to fix:
-    {task}
-
-    Read the relevant file(s), understand what needs to change, make the fix,
-    and save the result.
-    Preferred workflow: lapp_grep to locate the target line(s) → lapp_edit to
-    apply the change. Only use lapp_read for broader context.
+    Apply the following change to the file. Read the file first to locate the
+    exact content, make the replacement, save it.
+    Preferred: lapp_grep with literal=true to find the line → lapp_edit.
     No shell commands.
+
+    Repository root: {filepath}
+
+    {changes}
 """)
 
 # ---- OpenCode prompts (lowercase tool names, lapp exposed as lapp_lapp_*) ----
 PROMPT_A_OC = dedent("""\
-    You are fixing a bug in a software repository.
+    Apply the following change to the file. Read the file first to locate the
+    exact content, make the replacement, save it.
+    Use ONLY the read and edit tools. No shell commands.
 
-    Repository files are at: {filepath}
-    Issue to fix:
-    {task}
+    Repository root: {filepath}
 
-    Read the relevant file(s), understand what needs to change, make the fix,
-    and save the result. Use ONLY the read and edit tools. No shell commands.
+    {changes}
 """)
 
 PROMPT_B_OC = dedent("""\
-    You are fixing a bug in a software repository.
-
-    Repository files are at: {filepath}
-    Issue to fix:
-    {task}
-
-    Read the relevant file(s), understand what needs to change, make the fix,
-    and save the result.
-    Preferred workflow: lapp_lapp_grep to locate the target line(s) →
-    lapp_lapp_edit to apply the change. Only lapp_lapp_read for broader context.
+    Apply the following change to the file. Read the file first to locate the
+    exact content, make the replacement, save it.
+    Preferred: lapp_lapp_grep with literal=true to find the line → lapp_lapp_edit.
     No shell commands.
+
+    Repository root: {filepath}
+
+    {changes}
 """)
 
 
@@ -173,11 +166,67 @@ def write_lapp_mcp(lapp_binary: str, work_dir: Path, path: Path) -> None:
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
-    task_path = FILES_DIR / instance_id / "_task.txt"
-    task = task_path.read_text().strip() if task_path.exists() else "(task unavailable)"
-    return template.format(filepath=str(work_dir), task=task)
+def parse_patch_change(diff: str) -> list[dict]:
+    """
+    Parse a unified diff into a list of {file, old, new} dicts.
+    Each entry describes one hunk: the exact lines to find and replace.
+    Strips leading +/- markers; preserves indentation.
+    """
+    changes = []
+    current_file = None
+    old_lines: list[str] = []
+    new_lines: list[str] = []
 
+    def flush():
+        if current_file and (old_lines or new_lines):
+            changes.append({
+                "file": current_file,
+                "old": "\n".join(old_lines),
+                "new": "\n".join(new_lines),
+            })
+
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            flush()
+            current_file = line[6:]
+            old_lines, new_lines = [], []
+        elif line.startswith("@@ "):
+            flush()
+            old_lines, new_lines = [], []
+        elif line.startswith("-") and not line.startswith("---"):
+            old_lines.append(line[1:])
+        elif line.startswith("+") and not line.startswith("+++"):
+            new_lines.append(line[1:])
+
+    flush()
+    return changes
+
+
+def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
+    diff_path = FILES_DIR / instance_id / "_patch.diff"
+    diff = diff_path.read_text() if diff_path.exists() else ""
+    changes = parse_patch_change(diff)
+
+    if not changes:
+        # Fallback — should not happen for well-formed instances.
+        return template.format(filepath=str(work_dir), changes="(no changes parsed)")
+
+    blocks = []
+    for i, ch in enumerate(changes, 1):
+        full_path = str(work_dir / ch["file"])
+        label = f"Change {i}" if len(changes) > 1 else "Change"
+        blocks.append(
+            f"{label}\n"
+            f"  File: {full_path}\n"
+            f"  Find this exact content:\n{_indent(ch['old'])}\n"
+            f"  Replace with:\n{_indent(ch['new'])}"
+        )
+
+    return template.format(filepath=str(work_dir), changes="\n\n".join(blocks))
+
+
+def _indent(text: str) -> str:  # prefix every line with 4 spaces for readability
+    return "\n".join(f"    {l}" for l in text.splitlines())
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +273,7 @@ def run_opencode(
         "--model", OPENCODE_MODEL,
     ]
 
+    wall_start = time.monotonic()
     try:
         proc = subprocess.run(
             cmd,
@@ -236,12 +286,16 @@ def run_opencode(
         )
     except subprocess.TimeoutExpired:
         return _err(f"timeout after {TIMEOUT}s")
+    wall_ms = int((time.monotonic() - wall_start) * 1000)
+
 
     # Parse the event stream. Each line is a JSON event.
     output_tokens = input_tokens = cache_read = cache_write = num_turns = 0
     cost = 0.0
     tools_used: list[str] = []
     last_error = ""
+    turns_ms: list[int] = []
+    step_start_ts: int | None = None
 
     for line in proc.stdout.splitlines():
         line = line.strip()
@@ -251,7 +305,9 @@ def run_opencode(
             obj = json.loads(line)
             t = obj.get("type", "")
             part = obj.get("part", {})
-            if t == "tool_use":
+            if t == "step_start":
+                step_start_ts = obj.get("timestamp", 0)
+            elif t == "tool_use":
                 tools_used.append(part.get("tool", "?"))
             elif t == "step_finish":
                 tok = part.get("tokens", {})
@@ -261,10 +317,14 @@ def run_opencode(
                 cache_write   += tok.get("cache", {}).get("write", 0)
                 cost          += part.get("cost", 0.0)
                 num_turns     += 1
+                if step_start_ts:
+                    turns_ms.append(obj.get("timestamp", 0) - step_start_ts)
+                    step_start_ts = None
             elif t == "error":
                 err_data = obj.get("error", {})
                 last_error = str(err_data.get("data", {}).get("message", err_data))[:200]
         except json.JSONDecodeError:
+            pass
             pass
 
     if last_error and output_tokens == 0:
@@ -281,8 +341,10 @@ def run_opencode(
         "cache_create_tokens": cache_write,
         "num_turns":           num_turns,
         "cost_usd":            cost,
+        "wall_ms":             wall_ms,
+        "turns_ms":            turns_ms,
         "stop_reason":         "end_turn",
-        "tools_used":          tools_used,  # extra: lets report show which tools ran
+        "tools_used":          tools_used,
         "error":               "",
     }
 
@@ -308,6 +370,7 @@ def run_claude(
         "--allowedTools", allowed_tools,
     ]
 
+    wall_start = time.monotonic()
     try:
         proc = subprocess.run(
             cmd,
@@ -319,6 +382,8 @@ def run_claude(
         )
     except subprocess.TimeoutExpired:
         return _err(f"timeout after {TIMEOUT}s")
+    wall_ms = int((time.monotonic() - wall_start) * 1000)
+
 
     if proc.returncode != 0:
         detail = (proc.stderr[:300] or proc.stdout[:300]).strip()
@@ -341,6 +406,8 @@ def run_claude(
                 "cache_create_tokens": usage.get("cache_creation_input_tokens", 0),
                 "num_turns":           raw.get("num_turns", 0),
                 "cost_usd":            raw.get("total_cost_usd", 0.0),
+                "wall_ms":             wall_ms,
+                "turns_ms":            [],
                 "stop_reason":         subtype,
                 "error":               "max_turns",
             }
@@ -354,6 +421,8 @@ def run_claude(
         "cache_create_tokens": usage.get("cache_creation_input_tokens", 0),
         "num_turns":           raw.get("num_turns", 0),
         "cost_usd":            raw.get("total_cost_usd", 0.0),
+        "wall_ms":             raw.get("duration_ms", wall_ms),
+        "turns_ms":            [],  # claude --output-format json has no per-turn timestamps
         "stop_reason":         raw.get("stop_reason", ""),
         "error":               "",
     }
@@ -364,6 +433,7 @@ def _err(msg: str) -> dict:
         "output_tokens": 0, "input_tokens": 0,
         "cache_read_tokens": 0, "cache_create_tokens": 0,
         "num_turns": 0, "cost_usd": 0.0,
+        "wall_ms": 0, "turns_ms": [],
         "stop_reason": "", "error": msg,
     }
 

@@ -99,6 +99,18 @@ def _cost(usd: float) -> str:
     return f"${usd:.3f}"
 
 
+def _wall(ms: int) -> str:
+    if ms == 0:
+        return "—"
+    return f"{ms/1000:.0f}s"
+
+
+def _turn_avg(turns_ms: list) -> str:
+    if not turns_ms:
+        return "—"
+    return f"{sum(turns_ms)/len(turns_ms)/1000:.1f}s"
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -136,6 +148,8 @@ def main() -> None:
         f"{'A out':>7}  {'B out':>7}  {'Δ out':>7}  "
         f"{'A in':>7}  {'B in':>7}  "
         f"{'A turns':>7}  {'B turns':>7}  "
+        f"{'A wall':>7}  {'B wall':>7}  "
+        f"{'A t/turn':>8}  {'B t/turn':>8}  "
         f"{'A sim':>6}  {'B sim':>6}  "
         f"{'A cost':>7}  {'B cost':>7}"
     )
@@ -169,12 +183,14 @@ def main() -> None:
         err_a = a.get("error", "")
         err_b = b.get("error", "")
 
-        a_out = a.get("output_tokens", 0)
-        b_out = b.get("output_tokens", 0)
-        a_in  = a.get("input_tokens", 0) + a.get("cache_read_tokens", 0)
-        b_in  = b.get("input_tokens", 0) + b.get("cache_read_tokens", 0)
+        a_out  = a.get("output_tokens", 0)
+        b_out  = b.get("output_tokens", 0)
+        a_in   = a.get("input_tokens", 0) + a.get("cache_read_tokens", 0)
+        b_in   = b.get("input_tokens", 0) + b.get("cache_read_tokens", 0)
         a_cost = a.get("cost_usd", 0.0)
         b_cost = b.get("cost_usd", 0.0)
+        a_wall = a.get("wall_ms", 0)
+        b_wall = b.get("wall_ms", 0)
 
         sim_a = patch_similarity(a.get("diff", ""), ref)
         sim_b = patch_similarity(b.get("diff", ""), ref)
@@ -190,6 +206,8 @@ def main() -> None:
             f"{_tok(a_out):>7}  {_tok(b_out):>7}  {_delta(a_out, b_out):>7}  "
             f"{_tok(a_in):>7}  {_tok(b_in):>7}  "
             f"{a.get('num_turns', 0):>7}  {b.get('num_turns', 0):>7}  "
+            f"{_wall(a_wall):>7}  {_wall(b_wall):>7}  "
+            f"{_turn_avg(a.get('turns_ms',[])):>8}  {_turn_avg(b.get('turns_ms',[])):>8}  "
             f"{_pct(sim_a):>6}  {_pct(sim_b):>6}  "
             f"{_cost(a_cost):>7}  {_cost(b_cost):>7}"
             f"{flag}"
