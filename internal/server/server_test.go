@@ -222,6 +222,21 @@ func firstLineRef(t *testing.T, text, contains string) string {
 	return ""
 }
 
+// firstLineDisplayRef returns the displayed LINE#HASH: prefix from a formatted
+// line like "N#XX:content". Models often copy this exact token into lapp_edit.
+func firstLineDisplayRef(t *testing.T, text, contains string) string {
+	t.Helper()
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, contains) {
+			if i := strings.Index(line, ":"); i != -1 {
+				return line[:i+1]
+			}
+		}
+	}
+	t.Fatalf("no display ref found in lines containing %q in:\n%s", contains, text)
+	return ""
+}
+
 func strPtr(s string) *string { return &s }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -258,6 +273,58 @@ func TestRoundTrip_ReadEditSuccess(t *testing.T) {
 	}
 	if strings.Contains(string(data), "line two") {
 		t.Fatalf("old content still present: %s", string(data))
+	}
+}
+
+
+// Models often copy the displayed ref prefix from lapp_read output, e.g.
+// "2#KH:" instead of the machine form "2#KH". lapp_edit should accept that
+// directly rather than bouncing the model into a retry loop.
+func TestRoundTrip_ReadEditAcceptsColonSuffixedAnchor(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+
+	filePath := filepath.Join(cfg.Root, "anchor-colon.txt")
+	writeTestFile(t, filePath, "line one\nline two\nline three\n")
+
+	readOut := callRead(t, s, filePath, 0, 0)
+	anchor := firstLineDisplayRef(t, readOut, "line two") // e.g. "2#KH:"
+
+	editOut := callEdit(t, s, filePath, []editor.Edit{
+		{Type: editor.EditReplace, Anchor: anchor, Content: strPtr("line 2")},
+	})
+	if !strings.Contains(editOut, "OK:") {
+		t.Fatalf("edit with colon-suffixed anchor failed: %s", editOut)
+	}
+
+	data, _ := os.ReadFile(filePath)
+	if got := string(data); !strings.Contains(got, "line 2") || strings.Contains(got, "line two") {
+		t.Fatalf("file not updated correctly: %s", got)
+	}
+}
+
+func TestRoundTrip_ReadEditAcceptsColonSuffixedRangeRefs(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+
+	filePath := filepath.Join(cfg.Root, "range-colon.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\ndelta\n")
+
+	readOut := callRead(t, s, filePath, 0, 0)
+	start := firstLineDisplayRef(t, readOut, "beta")
+	end := firstLineDisplayRef(t, readOut, "gamma")
+
+	editOut := callEdit(t, s, filePath, []editor.Edit{
+		{Type: editor.EditReplace, Start: start, End: end, Content: strPtr("BETA\nGAMMA")},
+	})
+	if !strings.Contains(editOut, "OK:") {
+		t.Fatalf("edit with colon-suffixed range refs failed: %s", editOut)
+	}
+
+	data, _ := os.ReadFile(filePath)
+	got := string(data)
+	if !strings.Contains(got, "BETA\nGAMMA") || strings.Contains(got, "beta") || strings.Contains(got, "gamma") {
+		t.Fatalf("file not updated correctly: %s", got)
 	}
 }
 
