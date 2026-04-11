@@ -89,10 +89,11 @@ func (s *Server) registerTools() {
 
 	// lapp_grep
 	grepTool := mcp.NewTool("lapp_grep",
-		mcp.WithDescription(`Search files for a pattern and return matches with LINE#HASH references. Use the returned references directly in lapp_edit without a separate lapp_read call.`),
-		mcp.WithString("pattern", mcp.Required(), mcp.Description("Regex pattern to search for")),
+		mcp.WithDescription(`Search files for a pattern and return matches with LINE#HASH references. Use the returned references directly in lapp_edit without a separate lapp_read call. Use literal=true when searching for code that contains regex special characters such as ( ) \ . + * ? [ ] ^ $ |`),
+		mcp.WithString("pattern", mcp.Required(), mcp.Description("Pattern to search for. Interpreted as a regex unless literal=true")),
 		mcp.WithString("path", mcp.Description("File or directory to search (defaults to root)")),
 		mcp.WithNumber("context", mcp.Description("Lines of context around matches (default: 2)")),
+		mcp.WithBoolean("literal", mcp.Description("If true, treat pattern as a fixed string (no regex interpretation). Use when the search term contains code or regex metacharacters")),
 	)
 	s.mcpS.AddTool(grepTool, s.handleGrep)
 }
@@ -330,7 +331,15 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		ctxLines = maxCtxLines
 	}
 
-	re, err := regexp.Compile(pattern)
+	// literal=true: escape metacharacters so the pattern matches as a fixed string.
+	// This is the safe default for searching code content that contains regex syntax.
+	searchPat := pattern
+	if v, ok := args["literal"]; ok {
+		if b, ok2 := v.(bool); ok2 && b {
+			searchPat = regexp.QuoteMeta(pattern)
+		}
+	}
+	re, err := regexp.Compile(searchPat)
 	if err != nil {
 		return mcp.NewToolResultError("invalid pattern: " + err.Error()), nil
 	}

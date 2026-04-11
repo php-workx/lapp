@@ -10,10 +10,13 @@ Load via `instructions` array — always active, no skill load needed.
 | Need full context / small file (<300 lines) | `lapp_read` → `lapp_edit` |
 | New file | `lapp_write` |
 | Batch edits to one file | `lapp_read` → single `lapp_edit` call |
+| Search term contains code or special chars | `lapp_grep` with `literal=true` |
 
 ## Workflows
 
 **Fast (preferred):** `lapp_grep "<pattern>" path=<file>` → get LINE#HASH → `lapp_edit`
+
+**Code search (special chars in search term):** `lapp_grep "<pattern>" literal=true` — use when the search term contains `\`, `(`, `)`, `?`, `+`, `*`, `.`, `[`, `]`, `|`, `^`, `$`
 
 **Full-read:** `lapp_read` → pick refs → `lapp_edit` (batch all edits in one call)
 

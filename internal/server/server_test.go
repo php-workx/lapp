@@ -108,6 +108,69 @@ func callGrep(t *testing.T, s *Server, pattern, searchPath string) string {
 	return extractText(t, result)
 }
 
+func callGrepLiteral(t *testing.T, s *Server, pattern, searchPath string) string {
+	t.Helper()
+	args := map[string]any{"pattern": pattern, "literal": true}
+	if searchPath != "" {
+		args["path"] = searchPath
+	}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	result, err := s.handleGrep(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleGrep (literal) error: %v", err)
+	}
+	return extractText(t, result)
+}
+
+// TestGrepLiteralMatchesRegexMetachars verifies that literal=true treats the
+// pattern as a fixed string so code containing regex metacharacters like
+// \S+, (?:...), and @? is found correctly — the exact failure seen in the
+// benchmark when searching for a URL validator regex.
+func TestGrepLiteralMatchesRegexMetachars(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+
+	content := "package p\n" +
+		"const pat = `(?:\\S+(?::\\S*)?@)?`  // user:pass auth\n" +
+		"var x = 1\n"
+	filePath := filepath.Join(cfg.Root, "validators.go")
+	writeTestFile(t, filePath, content)
+
+	// Literal mode must find the exact line.
+	litOut := callGrepLiteral(t, s, `(?:\S+(?::\S*)?@)?`, filePath)
+	if !strings.Contains(litOut, "user:pass auth") {
+		t.Errorf("literal grep did not match target line:\n%s", litOut)
+	}
+	// The match must carry a LINE#HASH reference usable in lapp_edit.
+	if !strings.Contains(litOut, "#") {
+		t.Errorf("literal grep output missing LINE#HASH reference:\n%s", litOut)
+	}
+}
+
+// TestGrepLiteralInvalidRegexPattern verifies that a string that would be an
+// invalid regex is accepted and matched correctly under literal=true.
+func TestGrepLiteralInvalidRegexPattern(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+
+	content := "line one\nfound [unclosed bracket here\nline three\n"
+	filePath := filepath.Join(cfg.Root, "sample.txt")
+	writeTestFile(t, filePath, content)
+
+	// Regex mode must return an error.
+	regexOut := callGrep(t, s, `[unclosed`, filePath)
+	if !strings.Contains(regexOut, "invalid pattern") {
+		t.Errorf("expected invalid pattern error in regex mode, got: %s", regexOut)
+	}
+
+	// Literal mode must find the line cleanly.
+	litOut := callGrepLiteral(t, s, `[unclosed`, filePath)
+	if !strings.Contains(litOut, "unclosed bracket here") {
+		t.Errorf("literal grep did not find line with invalid-regex text:\n%s", litOut)
+	}
+}
+
 // extractText pulls the text from the first TextContent item.
 func extractText(t *testing.T, r *mcp.CallToolResult) string {
 	t.Helper()
