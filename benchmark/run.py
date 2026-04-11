@@ -36,8 +36,8 @@ FILES_DIR     = BENCHMARK_DIR / "files"
 RESULTS_DIR   = BENCHMARK_DIR / "results" / os.environ.get("RESULTS_SUBDIR", "default")
 INSTANCES_FILE = BENCHMARK_DIR / "instances.json"
 
-TIMEOUT   = 300   # seconds per agent run; read+edit of a small file is fast
-MAX_TURNS = 20    # upper bound; lapp may need extra turns on first read+edit attempts
+TIMEOUT   = 120   # seconds per config; >2m for a single-file targeted edit is benchmark-fail
+MAX_TURNS = 20    # upper bound; keeps loops visible while allowing a few retries
 
 # Agent selection: AGENT=claude (default) or AGENT=opencode
 AGENT = os.environ.get("AGENT", "claude")
