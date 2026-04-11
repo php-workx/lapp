@@ -157,10 +157,13 @@ def main() -> None:
         try:
             fetch_instance_files(inst)
 
-            # Write the clean diff alongside the files so run.py can embed it
-            # in the prompt without re-parsing instances.json at runtime.
+            # Write the clean diff and problem statement alongside the files.
+            # run.py uses problem_statement as the task prompt (real-world),
+            # and _patch.diff only for scoring correctness.
             diff_path = FILES_DIR / iid / "_patch.diff"
             diff_path.write_text(hunk_summary(inst["patch"]))
+            task_path = FILES_DIR / iid / "_task.txt"
+            task_path.write_text(inst.get("problem_statement", ""))
         except Exception as exc:
             print(f"    ERROR: {exc}", file=sys.stderr)
             failed.append(iid)

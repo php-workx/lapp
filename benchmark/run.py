@@ -51,54 +51,54 @@ TOOLS_B = "lapp_read,lapp_edit,lapp_write,lapp_grep"
 
 # ---- Claude prompts ----
 PROMPT_A = dedent("""\
-    Read the file shown below, apply the change, and save the result.
+    You are fixing a bug in a software repository.
 
-    Use ONLY the Read and Edit tools. Do not use any shell commands.
+    Repository files are at: {filepath}
+    Issue to fix:
+    {task}
 
-    File: {filepath}
-
-    Change to apply (unified diff — lines starting with - are removed, + are added):
-    {diff}
+    Read the relevant file(s), understand what needs to change, make the fix,
+    and save the result. Use ONLY the Read and Edit tools. No shell commands.
 """)
 
 PROMPT_B = dedent("""\
-    Apply the change shown below to the file at the given path.
+    You are fixing a bug in a software repository.
 
-    Preferred workflow for large files: use lapp_grep to locate the exact
-    LINE#HASH reference for the line(s) being changed, then lapp_edit to apply
-    the change. Only use lapp_read if you need broader context.
-    Do not use any shell commands.
+    Repository files are at: {filepath}
+    Issue to fix:
+    {task}
 
-    File: {filepath}
-
-    Change to apply (unified diff — lines starting with - are removed, + are added):
-    {diff}
+    Read the relevant file(s), understand what needs to change, make the fix,
+    and save the result.
+    Preferred workflow: lapp_grep to locate the target line(s) → lapp_edit to
+    apply the change. Only use lapp_read for broader context.
+    No shell commands.
 """)
 
-# ---- OpenCode prompts (tool names differ: lowercase, lapp exposed as lapp_lapp_*) ----
+# ---- OpenCode prompts (lowercase tool names, lapp exposed as lapp_lapp_*) ----
 PROMPT_A_OC = dedent("""\
-    Read the file shown below, apply the change, and save the result.
+    You are fixing a bug in a software repository.
 
-    Use ONLY the read and edit tools. Do not use bash or any shell commands.
+    Repository files are at: {filepath}
+    Issue to fix:
+    {task}
 
-    Repository root: {filepath}
-
-    Change to apply (unified diff — lines starting with - are removed, + are added):
-    {diff}
+    Read the relevant file(s), understand what needs to change, make the fix,
+    and save the result. Use ONLY the read and edit tools. No shell commands.
 """)
 
 PROMPT_B_OC = dedent("""\
-    Apply the change shown below to the file at the given path.
+    You are fixing a bug in a software repository.
 
-    Preferred workflow: use lapp_lapp_grep to locate the exact LINE#HASH reference
-    for the line(s) being changed, then lapp_lapp_edit to apply the change.
-    Only use lapp_lapp_read if you need broader context.
-    Do not use bash or any shell commands.
+    Repository files are at: {filepath}
+    Issue to fix:
+    {task}
 
-    Repository root: {filepath}
-
-    Change to apply (unified diff — lines starting with - are removed, + are added):
-    {diff}
+    Read the relevant file(s), understand what needs to change, make the fix,
+    and save the result.
+    Preferred workflow: lapp_lapp_grep to locate the target line(s) →
+    lapp_lapp_edit to apply the change. Only lapp_lapp_read for broader context.
+    No shell commands.
 """)
 
 
@@ -174,13 +174,9 @@ def write_lapp_mcp(lapp_binary: str, work_dir: Path, path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
-    diff_path = FILES_DIR / instance_id / "_patch.diff"
-    diff = diff_path.read_text() if diff_path.exists() else "(diff unavailable)"
-
-    # Find the primary changed file in the work dir. For multi-file patches
-    # both files are present; the diff already names them.
-    # We give the agent the work_dir root so it can resolve any path in the diff.
-    return template.format(filepath=str(work_dir), diff=diff)
+    task_path = FILES_DIR / instance_id / "_task.txt"
+    task = task_path.read_text().strip() if task_path.exists() else "(task unavailable)"
+    return template.format(filepath=str(work_dir), task=task)
 
 
 
