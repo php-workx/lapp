@@ -171,6 +171,29 @@ func TestGrepLiteralInvalidRegexPattern(t *testing.T) {
 	}
 }
 
+// TestGrepLiteralMatchesRegexEscapedPunctuation verifies that literal=true
+// tolerates model-generated regex escaping on punctuation, e.g. `\[` and `\.`.
+// Kimi emitted this shape while searching for a code line under literal=true,
+// which caused an unnecessary second grep round trip.
+func TestGrepLiteralMatchesRegexEscapedPunctuation(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+
+	content := "func f() {\n" +
+		"    cright[-right.shape[0]:, -right.shape[1]:] = 1\n" +
+		"}\n"
+	filePath := filepath.Join(cfg.Root, "separable.py")
+	writeTestFile(t, filePath, content)
+
+	// Model over-escaped punctuation as if this were still a regex even though it
+	// also set literal=true.
+	pat := `cright\[-right\.shape\[0\]:, -right\.shape\[1\]:\] = 1`
+	litOut := callGrepLiteral(t, s, pat, filePath)
+	if !strings.Contains(litOut, `cright[-right.shape[0]:, -right.shape[1]:] = 1`) {
+		t.Errorf("literal grep did not normalize regex-escaped punctuation:\n%s", litOut)
+	}
+}
+
 // extractText pulls the text from the first TextContent item.
 func extractText(t *testing.T, r *mcp.CallToolResult) string {
 	t.Helper()
