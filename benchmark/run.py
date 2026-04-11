@@ -65,6 +65,9 @@ PROMPT_B = dedent("""\
     Apply the following change to the file. Read the file first to locate the
     exact content, make the replacement, save it.
     Preferred: lapp_grep with literal=true to find the line → lapp_edit.
+    If a change spans multiple lines, find the FIRST line and LAST line and
+    use a range edit with start/end. Do not use a single-anchor replace for a
+    multi-line block.
     No shell commands.
 
     Repository root: {filepath}
@@ -87,6 +90,9 @@ PROMPT_B_OC = dedent("""\
     Apply the following change to the file. Read the file first to locate the
     exact content, make the replacement, save it.
     Preferred: lapp_lapp_grep with literal=true to find the line → lapp_lapp_edit.
+    If a change spans multiple lines, find the FIRST line and LAST line and
+    use start/end range replacement in lapp_lapp_edit. Do not use a single
+    anchor replace for a multi-line block.
     No shell commands.
 
     Repository root: {filepath}
@@ -215,12 +221,36 @@ def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
     for i, ch in enumerate(changes, 1):
         full_path = str(work_dir / ch["file"])
         label = f"Change {i}" if len(changes) > 1 else "Change"
-        blocks.append(
-            f"{label}\n"
-            f"  File: {full_path}\n"
-            f"  Find this exact content:\n{_indent(ch['old'])}\n"
-            f"  Replace with:\n{_indent(ch['new'])}"
-        )
+        old_lines = ch['old'].splitlines()
+        new_lines = ch['new'].splitlines()
+
+        if not old_lines or not new_lines:
+            old_block = _indent(ch['old']) if ch['old'] else '    (no old lines in this hunk)'
+            new_block = _indent(ch['new']) if ch['new'] else '    (delete the matched range)'
+            blocks.append(
+                f"{label}\n"
+                f"  File: {full_path}\n"
+                f"  This hunk includes insertion-only or deletion-only lines.\n"
+                f"  Old block (if any):\n{old_block}\n"
+                f"  New block (if any):\n{new_block}"
+            )
+        elif len(old_lines) > 1 or len(new_lines) > 1:
+            blocks.append(
+                f"{label}\n"
+                f"  File: {full_path}\n"
+                f"  This is a MULTI-LINE range replacement.\n"
+                f"  First line to replace:\n{_indent(old_lines[0])}\n"
+                f"  Last line to replace:\n{_indent(old_lines[-1])}\n"
+                f"  Replace the entire range containing this exact old block:\n{_indent(ch['old'])}\n"
+                f"  With this new block:\n{_indent(ch['new'])}"
+            )
+        else:
+            blocks.append(
+                f"{label}\n"
+                f"  File: {full_path}\n"
+                f"  Find this exact content:\n{_indent(ch['old'])}\n"
+                f"  Replace with:\n{_indent(ch['new'])}"
+            )
 
     return template.format(filepath=str(work_dir), changes="\n\n".join(blocks))
 
