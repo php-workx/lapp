@@ -65,6 +65,26 @@ func TestApplyEdits_SingleReplace(t *testing.T) {
 	}
 }
 
+func TestApplyEdits_SingleReplacePreservesIndentation(t *testing.T) {
+	lines := []string{
+		"def f():",
+		"        value = 1",
+		"        return value",
+	}
+	fd := makeFileData(lines)
+	anchor := ref(lines, 2)
+	req := makeReq("f.py", []editor.Edit{
+		{Type: editor.EditReplace, Anchor: anchor, Content: strPtr("            value = right")},
+	})
+	newLines, _, code, detail := editor.ApplyEdits(fd, req)
+	if code != "" {
+		t.Fatalf("unexpected error %s: %s", code, detail)
+	}
+	if newLines[1] != "        value = right" {
+		t.Fatalf("expected indentation to be preserved, got %q", newLines[1])
+	}
+}
+
 func TestApplyEdits_RangeReplace(t *testing.T) {
 	lines := testLines5
 	fd := makeFileData(lines)
