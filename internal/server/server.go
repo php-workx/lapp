@@ -107,6 +107,16 @@ func (s *Server) registerTools() {
 		mcp.WithBoolean("normalize_whitespace", mcp.Description("If false, require exact indentation match. Default true ignores shared leading indentation differences when matching the block.")),
 	)
 	s.mcpS.AddTool(findBlockTool, s.handleFindBlock)
+
+	// lapp_replace_block
+	replaceBlockTool := mcp.NewTool("lapp_replace_block",
+		mcp.WithDescription(`Replace one exact multi-line block in a file. Provide old_content and new_content; lapp will find the old block, resolve start/end refs internally, and apply one range replacement. By default, matching ignores shared leading indentation differences across the whole block.`),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the file to modify")),
+		mcp.WithString("old_content", mcp.Required(), mcp.Description("Exact old block to replace.")),
+		mcp.WithString("new_content", mcp.Required(), mcp.Description("Replacement block content.")),
+		mcp.WithBoolean("normalize_whitespace", mcp.Description("If false, require exact indentation match. Default true ignores shared leading indentation differences when matching the old block.")),
+	)
+	s.mcpS.AddTool(replaceBlockTool, s.handleReplaceBlock)
 }
 
 
@@ -602,6 +612,37 @@ func stripSharedIndent(lines []string) []string {
 	return out
 }
 
+func findBlockRanges(lines, needle []string, normalizeWhitespace bool) []blockRange {
+	needleNorm := needle
+	if normalizeWhitespace {
+		needleNorm = stripSharedIndent(needle)
+	}
+	var matches []blockRange
+	for i := 0; i+len(needle) <= len(lines); i++ {
+		window := lines[i : i+len(needle)]
+		windowCmp := window
+		if normalizeWhitespace {
+			windowCmp = stripSharedIndent(window)
+		}
+		ok := true
+		for j := range needleNorm {
+			if windowCmp[j] != needleNorm[j] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			matches = append(matches, blockRange{start: i + 1, end: i + len(needle)})
+		}
+	}
+	return matches
+}
+
+type blockRange struct {
+	start int
+	end   int
+}
+
 func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
@@ -640,30 +681,11 @@ func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (
 	if len(needle) == 0 {
 		return mcp.NewToolResultError("content parameter required"), nil
 	}
-	needleNorm := needle
-	if normalizeWhitespace {
-		needleNorm = stripSharedIndent(needle)
-	}
 	lines := fd.Lines
 	var matches []blockMatch
-	for i := 0; i+len(needle) <= len(lines); i++ {
-		window := lines[i : i+len(needle)]
-		windowCmp := window
-		if normalizeWhitespace {
-			windowCmp = stripSharedIndent(window)
-		}
-		ok := true
-		for j := range needleNorm {
-			if windowCmp[j] != needleNorm[j] {
-				ok = false
-				break
-			}
-		}
-		if !ok {
-			continue
-		}
-		startLine := i + 1
-		endLine := i + len(needle)
+	for _, m := range findBlockRanges(lines, needle, normalizeWhitespace) {
+		startLine := m.start
+		endLine := m.end
 		preview := make([]string, 0, len(needle))
 		for k := startLine; k <= endLine; k++ {
 			preview = append(preview, hashline.FormatLine(lines[k-1], k))
@@ -677,4 +699,69 @@ func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (
 	}
 	jsonBytes, _ := json.Marshal(findBlockResult{Matches: matches})
 	return mcp.NewToolResultText(string(jsonBytes)), nil
+}
+
+func (s *Server) handleReplaceBlock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	oldContent, err := req.RequireString("old_content")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	newContent, err := req.RequireString("new_content")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	args := req.GetArguments()
+	normalizeWhitespace := true
+	if v, ok := args["normalize_whitespace"]; ok {
+		if b, ok2 := v.(bool); ok2 {
+			normalizeWhitespace = b
+		}
+	}
+
+	canonical, errCode := fileio.CheckPath(path, s.cfg, true)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	unlock, errCode := fileio.AcquireLock(canonical)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	defer unlock()
+	fd, errCode := fileio.ReadFile(canonical, s.cfg)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	needle := splitSearchContent(oldContent)
+	if len(needle) == 0 {
+		return mcp.NewToolResultError("old_content parameter required"), nil
+	}
+	ranges := findBlockRanges(fd.Lines, needle, normalizeWhitespace)
+	if len(ranges) == 0 {
+		return mcp.NewToolResultError("old block not found"), nil
+	}
+	if len(ranges) > 1 {
+		return mcp.NewToolResultError(fmt.Sprintf("old block matched %d ranges; narrow the block or use lapp_find_block first", len(ranges))), nil
+	}
+	r := ranges[0]
+	startRef := fmt.Sprintf("%d#%s", r.start, hashline.HashLine(fd.Lines[r.start-1], r.start))
+	endRef := fmt.Sprintf("%d#%s", r.end, hashline.HashLine(fd.Lines[r.end-1], r.end))
+	edits := []editor.Edit{{Type: editor.EditReplace, Start: startRef, End: endRef, Content: &newContent}}
+	editReq := &editor.EditRequest{Path: path, Edits: edits}
+	newLines, result, errCode, errDetail := editor.ApplyEdits(fd, editReq)
+	if errCode != "" {
+		msg := errCode
+		if errDetail != "" {
+			msg = errCode + ": " + errDetail
+		}
+		return mcp.NewToolResultError(msg), nil
+	}
+	if wc := fileio.WriteFile(fd, newLines); wc != "" {
+		return mcp.NewToolResultError(wc), nil
+	}
+	resp := fmt.Sprintf("OK: %d line(s) changed\n%s", result.LinesChanged, result.Diff)
+	return mcp.NewToolResultText(resp), nil
 }

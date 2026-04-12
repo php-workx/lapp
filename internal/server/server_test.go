@@ -174,6 +174,18 @@ func callFindBlockNormalized(t *testing.T, s *Server, filePath, content string) 
 	return extractText(t, result)
 }
 
+func callReplaceBlock(t *testing.T, s *Server, filePath, oldContent, newContent string) string {
+	t.Helper()
+	args := map[string]any{"path": filePath, "old_content": oldContent, "new_content": newContent}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	result, err := s.handleReplaceBlock(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleReplaceBlock error: %v", err)
+	}
+	return extractText(t, result)
+}
+
 type parsedFindBlock struct {
 	Matches []struct {
 		Path    string   `json:"path"`
@@ -378,6 +390,55 @@ func TestFindBlockNormalizeWhitespaceMatchesShiftedIndent(t *testing.T) {
 		t.Fatalf("expected lines 3-4, got start=%s end=%s", got.Matches[0].Start, got.Matches[0].End)
 	}
 }
+
+func TestReplaceBlockExactMatch(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "replace-block.py")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\ndelta\n")
+
+	out := callReplaceBlock(t, s, filePath, "beta\ngamma", "BETA\nGAMMA")
+	if !strings.Contains(out, "OK:") {
+		t.Fatalf("replace block failed: %s", out)
+	}
+	data, _ := os.ReadFile(filePath)
+	got := string(data)
+	if !strings.Contains(got, "BETA\nGAMMA") || strings.Contains(got, "beta") || strings.Contains(got, "gamma") {
+		t.Fatalf("file not updated correctly: %s", got)
+	}
+}
+
+func TestReplaceBlockNormalizeWhitespace(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "replace-block-indent.py")
+	writeTestFile(t, filePath, "class A:\n    def f(self):\n        x = 1\n        return x\n")
+
+	old := "            x = 1\n            return x"
+	new := "            x = right\n            return x"
+	out := callReplaceBlock(t, s, filePath, old, new)
+	if !strings.Contains(out, "OK:") {
+		t.Fatalf("replace block with normalized whitespace failed: %s", out)
+	}
+	data, _ := os.ReadFile(filePath)
+	got := string(data)
+	if !strings.Contains(got, "        x = right") {
+		t.Fatalf("expected normalized replace to preserve file indentation, got: %s", got)
+	}
+}
+
+func TestReplaceBlockAmbiguousMatchErrors(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "replace-ambiguous.py")
+	writeTestFile(t, filePath, "same\nblock\nX\nsame\nblock\nY\n")
+
+	out := callReplaceBlock(t, s, filePath, "same\nblock", "new\nblock")
+	if !strings.Contains(out, "matched 2 ranges") {
+		t.Fatalf("expected ambiguous-match error, got: %s", out)
+	}
+}
+
 
 // extractText pulls the text from the first TextContent item.
 func extractText(t *testing.T, r *mcp.CallToolResult) string {
