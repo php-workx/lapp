@@ -100,6 +100,14 @@ def fmt_corr(v):
     return f"{v*100:.0f}%"
 
 
+def fmt_tok(n):
+    return f"{n:,}"
+
+
+def short_model(name: str) -> str:
+    return name.replace('ollama-cloud/', '')
+
+
 def main():
     if len(sys.argv) > 1:
         dirs = sys.argv[1:]
@@ -109,9 +117,13 @@ def main():
             for p in RESULTS.rglob('*')
             if p.is_dir() and any(p.glob('*.json')) and '_legacy' not in p.parts
         ]
+
     print("V1 benchmark summary")
-    print("suite, model_dir, pairs, corr(A→B), wall(A→B), turns(A→B), out(A→B), in(A→B)")
-    for suite_name in SUITES["suites"]:
+    print("Primary metrics: correctness, wall time, turn count, output tokens, input tokens")
+
+    for suite_name, suite in SUITES["suites"].items():
+        rows_out = []
+        expected = set(suite["instances"])
         for d in sorted(dirs):
             rows = load_dir(d)
             if not rows:
@@ -119,24 +131,52 @@ def main():
             row_suite = rows[0].get("suite")
             if row_suite and row_suite != suite_name:
                 continue
-            expected = set(SUITES["suites"][suite_name]["instances"])
             actual = {r["instance_id"] for r in rows}
             if not actual.intersection(expected):
                 continue
             rows = [r for r in rows if r["instance_id"] in expected]
             s = summarize(rows)
-            model_label = rows[0].get("model", d)
+            model_label = short_model(rows[0].get("model", d))
+            grep_format = rows[0].get("grep_format", "text")
+            if grep_format != "text":
+                model_label += f" [grep={grep_format}]"
             if not s:
-                print(f"{suite_name}, {model_label}, 0/{len(expected)}, no complete pairs")
+                rows_out.append([model_label, f"0/{len(expected)}", "—", "—", "—", "—", "—", "—", "—", "—", "—"])
                 continue
-            print(
-                f"{suite_name}, {model_label}, {s['pairs']}/{len(expected)}, "
-                f"{fmt_corr(s['a_corr'])}->{fmt_corr(s['b_corr'])} ({fmt_pct(s['d_corr'])}), "
-                f"{fmt_ms(s['a_wall'])}->{fmt_ms(s['b_wall'])} ({fmt_pct(s['d_wall'])}), "
-                f"{s['a_turns']}->{s['b_turns']} ({fmt_pct(s['d_turns'])}), "
-                f"{s['a_out']}->{s['b_out']} ({fmt_pct(s['d_out'])}), "
-                f"{s['a_in']}->{s['b_in']} ({fmt_pct(s['d_in'])})"
-            )
+            rows_out.append([
+                model_label,
+                f"{s['pairs']}/{len(expected)}",
+                fmt_corr(s['a_corr']), fmt_corr(s['b_corr']), fmt_pct(s['d_corr']),
+                fmt_ms(s['a_wall']), fmt_ms(s['b_wall']), fmt_pct(s['d_wall']),
+                str(s['a_turns']), str(s['b_turns']), fmt_pct(s['d_turns']),
+                fmt_tok(s['a_out']), fmt_tok(s['b_out']), fmt_pct(s['d_out']),
+                fmt_tok(s['a_in']), fmt_tok(s['b_in']), fmt_pct(s['d_in']),
+            ])
+
+        if not rows_out:
+            continue
+
+        print()
+        print(f"Suite: {suite_name}")
+        print(suite.get("description", ""))
+        header = [
+            "Model", "Pairs",
+            "Corr A", "Corr B", "ΔCorr",
+            "Wall A", "Wall B", "ΔWall",
+            "Turns A", "Turns B", "ΔTurns",
+            "Out A", "Out B", "ΔOut",
+            "In A", "In B", "ΔIn",
+        ]
+        widths = [len(h) for h in header]
+        for row in rows_out:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(cell))
+        def fmt_row(row):
+            return "  ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row))
+        print(fmt_row(header))
+        print("  ".join('-' * w for w in widths))
+        for row in rows_out:
+            print(fmt_row(row))
 
 
 if __name__ == "__main__":

@@ -124,15 +124,22 @@ func splitContent(content string) []string {
 }
 
 // normalizeRef accepts refs copied directly from lapp_read/lapp_grep output,
-// which are displayed as LINE#HASH:CONTENT. lapp_edit expects LINE#HASH, so
-// trim a single trailing colon when the ref contains a hash component. Keep
-// special anchors 0: and EOF: unchanged.
+// normalizeRef accepts refs copied directly from lapp_read/lapp_grep output.
+// Valid inputs include:
+//   LINE#HASH
+//   LINE#HASH:
+//   LINE#HASH:full line text
+// Special anchors 0: and EOF: are preserved unchanged.
 func normalizeRef(ref string) string {
 	if ref == "0:" || ref == "EOF:" {
 		return ref
 	}
-	if strings.Contains(ref, "#") && strings.HasSuffix(ref, ":") {
-		return strings.TrimSuffix(ref, ":")
+	if !strings.Contains(ref, "#") {
+		return ref
+	}
+	// If the model pasted a full display line, keep only the LINE#HASH prefix.
+	if i := strings.Index(ref, ":"); i != -1 {
+		return ref[:i]
 	}
 	return ref
 }
@@ -425,10 +432,9 @@ func FormatMismatchError(mismatches []RefMismatch, lines []string) string {
 }
 
 // BuildSelfCorrectResult constructs the SelfCorrectResult returned when
-// lapp_edit is called without a prior lapp_read. The Note is always included
-// because MCP is stateless — we cannot track consecutive failures (§5.1,
-// pre-mortem fix pm-20260404-004).
-func BuildSelfCorrectResult(lines []string, limit int) *SelfCorrectResult {
+// lapp_edit is called without usable refs. The message may explain the likely
+// formatting mistake so the model can recover without guessing.
+func BuildSelfCorrectResult(lines []string, limit int, message string) *SelfCorrectResult {
 	displayLines := len(lines)
 	if limit > 0 && limit < displayLines {
 		displayLines = limit
@@ -441,12 +447,32 @@ func BuildSelfCorrectResult(lines []string, limit int) *SelfCorrectResult {
 	if displayLines < len(lines) {
 		truncNote = fmt.Sprintf("\n[Showing lines 1-%d of %d. Use offset parameter to read more.]", displayLines, len(lines))
 	}
+	if message == "" {
+		message = "No valid LINE#HASH references found. Use the file_content below to construct your edits."
+	}
 	return &SelfCorrectResult{
 		Status:      "needs_read_first",
-		Message:     "No valid LINE#HASH references found. Use the file_content below to construct your edits.",
+		Message:     message,
 		FileContent: strings.Join(formatted, "\n") + truncNote,
 		Note:        "If unable to proceed after using these references, report the edit as blocked rather than retrying further.",
 	}
+}
+
+func inferSelfCorrectMessage(edits []Edit) string {
+	for _, e := range edits {
+		for _, r := range []string{e.Anchor, e.Start, e.End} {
+			if r == "" {
+				continue
+			}
+			if regexp.MustCompile(`^\d+$`).MatchString(r) {
+				return fmt.Sprintf("Ref %q is missing the #HASH part. Use the full LINE#HASH reference returned by lapp_read or lapp_grep.", r)
+			}
+			if strings.Contains(r, "#") && strings.Contains(r, ":") && !strings.HasSuffix(r, ":") {
+				return fmt.Sprintf("Ref %q looks like a full display line. Use just the LINE#HASH prefix or paste the full line — lapp will extract it automatically.", r)
+			}
+		}
+	}
+	return ""
 }
 
 // IsNoOp returns true if the original and result line slices are identical.
@@ -489,7 +515,7 @@ func ApplyEdits(fd *fileio.FileData, req *EditRequest) ([]string, *EditResult, s
 		}
 	}
 	if hasAnyRef && !hasValidHashlineRef {
-		return nil, nil, "SELF_CORRECT", ""
+		return nil, nil, "SELF_CORRECT", inferSelfCorrectMessage(req.Edits)
 	}
 
 	parsed, errCode, errDetail := ValidateEdits(req.Edits, lines)

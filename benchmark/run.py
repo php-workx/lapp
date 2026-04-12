@@ -47,6 +47,7 @@ AGENT = os.environ.get("AGENT", "claude")
 # OpenCode model to use (any model string opencode accepts)
 OPENCODE_MODEL  = os.environ.get("OPENCODE_MODEL", "opencode/gpt-5-nano")
 OPENCODE_CONFIG = Path.home() / ".config/opencode/opencode.json"
+LAPP_GREP_FORMAT = os.environ.get("LAPP_GREP_FORMAT", "text")
 
 # Claude tool names (--allowedTools values)
 TOOLS_A = "Read,Edit,Write"
@@ -67,10 +68,10 @@ PROMPT_A = dedent("""\
 PROMPT_B = dedent("""\
     Apply the following change to the file. Read the file first to locate the
     exact content, make the replacement, save it.
-    Preferred: lapp_grep with literal=true to find the line → lapp_edit.
-    If a change spans multiple lines, find the FIRST line and LAST line and
-    use a range edit with start/end. Do not use a single-anchor replace for a
-    multi-line block.
+    {grep_hint}
+    If a change spans multiple lines, prefer lapp_find_block with the exact old
+    block, then use the returned start/end refs in lapp_edit.
+    Do not use a single-anchor replace for a multi-line block.
     No shell commands. Do not explain your steps.
 
     Repository root: {filepath}
@@ -93,10 +94,10 @@ PROMPT_A_OC = dedent("""\
 PROMPT_B_OC = dedent("""\
     Apply the following change to the file. Read the file first to locate the
     exact content, make the replacement, save it.
-    Preferred: lapp_lapp_grep with literal=true to find the line → lapp_lapp_edit.
-    If a change spans multiple lines, find the FIRST line and LAST line and
-    use start/end range replacement in lapp_lapp_edit. Do not use a single
-    anchor replace for a multi-line block.
+    {grep_hint}
+    If a change spans multiple lines, prefer lapp_lapp_find_block with the exact
+    old block, then use the returned start/end refs in lapp_lapp_edit.
+    Do not use a single-anchor replace for a multi-line block.
     No shell commands. Do not explain your steps.
 
     Repository root: {filepath}
@@ -219,7 +220,7 @@ def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
 
     if not changes:
         # Fallback — should not happen for well-formed instances.
-        return template.format(filepath=str(work_dir), changes="(no changes parsed)")
+        return template.format(filepath=str(work_dir), changes="(no changes parsed)", grep_hint=grep_hint())
 
     blocks = []
     for i, ch in enumerate(changes, 1):
@@ -256,7 +257,19 @@ def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
                 f"  Replace with:\n{_indent(ch['new'])}"
             )
 
-    return template.format(filepath=str(work_dir), changes="\n\n".join(blocks))
+    return template.format(filepath=str(work_dir), changes="\n\n".join(blocks), grep_hint=grep_hint())
+
+
+def grep_hint() -> str:
+    if AGENT == "opencode":
+        tool = "lapp_lapp_grep"
+        edit = "lapp_lapp_edit"
+    else:
+        tool = "lapp_grep"
+        edit = "lapp_edit"
+    if LAPP_GREP_FORMAT == "structured":
+        return f"Preferred: {tool} with literal=true and format=structured to get a machine-readable anchor, then use that anchor directly in {edit}."
+    return f"Preferred: {tool} with literal=true to find the line → {edit}."
 
 
 def _indent(text: str) -> str:  # prefix every line with 4 spaces for readability
@@ -574,6 +587,10 @@ def current_model_name() -> str:
     return OPENCODE_MODEL if AGENT == "opencode" else os.environ.get("CLAUDE_MODEL", "claude")
 
 
+def current_grep_variant() -> str:
+    return LAPP_GREP_FORMAT if AGENT == "opencode" else "text"
+
+
 def slug_model_name(name: str) -> str:
     out = []
     for ch in name:
@@ -593,6 +610,8 @@ def canonical_results_dir(suite_name: str | None) -> Path:
         return RESULTS_BASE / override
     suite_part = suite_name or 'ad-hoc'
     model_part = f"{AGENT}__{slug_model_name(current_model_name())}"
+    if current_grep_variant() != "text":
+        model_part += f"__grep-{slug_model_name(current_grep_variant())}"
     return RESULTS_BASE / suite_part / model_part
 
 
@@ -648,6 +667,7 @@ def main() -> None:
         result.setdefault("suite", suite_name or "ad-hoc")
         result.setdefault("agent", AGENT)
         result.setdefault("model", current_model_name())
+        result.setdefault("grep_format", current_grep_variant())
         out_path.write_text(json.dumps(result, indent=2))
 
         if "error" in result and "a" not in result:
