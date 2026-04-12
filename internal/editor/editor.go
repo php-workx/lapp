@@ -123,6 +123,32 @@ func splitContent(content string) []string {
 	return parts
 }
 
+func leadingIndent(s string) string {
+	i := 0
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return s[:i]
+}
+
+func preserveSingleLineIndent(originalLine string, replacement []string) []string {
+	if len(replacement) != 1 {
+		return replacement
+	}
+	oldIndent := leadingIndent(originalLine)
+	if oldIndent == "" {
+		return replacement
+	}
+	trimmed := strings.TrimLeft(replacement[0], " \t")
+	if trimmed == "" {
+		return replacement
+	}
+	if leadingIndent(replacement[0]) == oldIndent {
+		return replacement
+	}
+	return []string{oldIndent + trimmed}
+}
+
 // normalizeRef accepts refs copied directly from lapp_read/lapp_grep output,
 // normalizeRef accepts refs copied directly from lapp_read/lapp_grep output.
 // Valid inputs include:
@@ -578,6 +604,12 @@ func applyOne(pe parsedEdit, lines []string) []string {
 		var newContent []string
 		if e.Content != nil && *e.Content != "" {
 			newContent = splitContent(*e.Content)
+			if pe.startLine == pe.endLine && pe.startLine >= 1 && pe.startLine <= len(lines) {
+				// Single-line anchored replacements should preserve the original line's
+ 				// indentation unless the caller uses a broader range edit. Models often
+				// change leading whitespace accidentally when rewriting one code line.
+				newContent = preserveSingleLineIndent(lines[pe.startLine-1], newContent)
+			}
 		}
 		// splice: replace [startLine-1 : endLine] with newContent
 		start := pe.startLine - 1
