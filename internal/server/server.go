@@ -99,11 +99,12 @@ func (s *Server) registerTools() {
 	s.mcpS.AddTool(grepTool, s.handleGrep)
 
 	// lapp_find_block
- 	findBlockTool := mcp.NewTool("lapp_find_block",
-		mcp.WithDescription(`Find an exact multi-line code block in a file and return start/end LINE#HASH references usable directly in lapp_edit. Use this for multi-line replacements where grepping the first and last line separately is ambiguous.`),
+	findBlockTool := mcp.NewTool("lapp_find_block",
+		mcp.WithDescription(`Find an exact multi-line code block in a file and return start/end LINE#HASH references usable directly in lapp_edit. Use this for multi-line replacements where grepping the first and last line separately is ambiguous. By default, matching ignores shared leading indentation differences across the whole block.`),
 		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the file to search")),
-		mcp.WithString("content", mcp.Required(), mcp.Description("Exact block content to find. Preserve indentation and line breaks exactly.")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("Exact block content to find. Preserve line breaks exactly.")),
 		mcp.WithBoolean("literal", mcp.Description("If true, treat content as a literal block (default true). Regex block search is not currently supported.")),
+		mcp.WithBoolean("normalize_whitespace", mcp.Description("If false, require exact indentation match. Default true ignores shared leading indentation differences when matching the block.")),
 	)
 	s.mcpS.AddTool(findBlockTool, s.handleFindBlock)
 }
@@ -570,6 +571,37 @@ func splitSearchContent(content string) []string {
 	return parts
 }
 
+func stripSharedIndent(lines []string) []string {
+	minIndent := -1
+	for _, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if trimmed == "" {
+			continue
+		}
+		indent := len(line) - len(trimmed)
+		if minIndent == -1 || indent < minIndent {
+			minIndent = indent
+		}
+	}
+	if minIndent <= 0 {
+		return lines
+	}
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if trimmed == "" {
+			out[i] = ""
+			continue
+		}
+		if len(line) >= minIndent {
+			out[i] = line[minIndent:]
+		} else {
+			out[i] = trimmed
+		}
+	}
+	return out
+}
+
 func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
@@ -584,6 +616,12 @@ func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (
 	if v, ok := args["literal"]; ok {
 		if b, ok2 := v.(bool); ok2 {
 			literal = b
+		}
+	}
+	normalizeWhitespace := true
+	if v, ok := args["normalize_whitespace"]; ok {
+		if b, ok2 := v.(bool); ok2 {
+			normalizeWhitespace = b
 		}
 	}
 	if !literal {
@@ -602,12 +640,21 @@ func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (
 	if len(needle) == 0 {
 		return mcp.NewToolResultError("content parameter required"), nil
 	}
+	needleNorm := needle
+	if normalizeWhitespace {
+		needleNorm = stripSharedIndent(needle)
+	}
 	lines := fd.Lines
 	var matches []blockMatch
 	for i := 0; i+len(needle) <= len(lines); i++ {
+		window := lines[i : i+len(needle)]
+		windowCmp := window
+		if normalizeWhitespace {
+			windowCmp = stripSharedIndent(window)
+		}
 		ok := true
-		for j := range needle {
-			if lines[i+j] != needle[j] {
+		for j := range needleNorm {
+			if windowCmp[j] != needleNorm[j] {
 				ok = false
 				break
 			}

@@ -162,6 +162,18 @@ func callFindBlock(t *testing.T, s *Server, filePath, content string) string {
 	return extractText(t, result)
 }
 
+func callFindBlockNormalized(t *testing.T, s *Server, filePath, content string) string {
+	t.Helper()
+	args := map[string]any{"path": filePath, "content": content, "literal": true, "normalize_whitespace": true}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	result, err := s.handleFindBlock(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleFindBlock (normalized) error: %v", err)
+	}
+	return extractText(t, result)
+}
+
 type parsedFindBlock struct {
 	Matches []struct {
 		Path    string   `json:"path"`
@@ -347,6 +359,26 @@ func TestFindBlockNoMatchReturnsEmptyMatches(t *testing.T) {
 	}
 }
 
+func TestFindBlockNormalizeWhitespaceMatchesShiftedIndent(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "indent-block.py")
+	writeTestFile(t, filePath, "class A:\n    def f(self):\n        x = 1\n        return x\n")
+
+	query := "            x = 1\n            return x"
+	out := callFindBlockNormalized(t, s, filePath, query)
+	var got parsedFindBlock
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, out)
+	}
+	if len(got.Matches) != 1 {
+		t.Fatalf("expected 1 match, got %d: %s", len(got.Matches), out)
+	}
+	if !strings.HasPrefix(got.Matches[0].Start, "3#") || !strings.HasPrefix(got.Matches[0].End, "4#") {
+		t.Fatalf("expected lines 3-4, got start=%s end=%s", got.Matches[0].Start, got.Matches[0].End)
+	}
+}
+
 // extractText pulls the text from the first TextContent item.
 func extractText(t *testing.T, r *mcp.CallToolResult) string {
 	t.Helper()
@@ -526,6 +558,26 @@ func TestRoundTrip_ReadEditAcceptsFullDisplayLineAnchor(t *testing.T) {
 	editOut := callEdit(t, s, filePath, []editor.Edit{{Type: editor.EditReplace, Anchor: anchor, Content: strPtr("line 2")}})
 	if !strings.Contains(editOut, "OK:") {
 		t.Fatalf("edit with full display-line anchor failed: %s", editOut)
+	}
+	data, _ := os.ReadFile(filePath)
+	if got := string(data); !strings.Contains(got, "line 2") || strings.Contains(got, "line two") {
+		t.Fatalf("file not updated correctly: %s", got)
+	}
+}
+
+func TestRoundTrip_ReadEditAcceptsColonSeparatedHashRef(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "anchor-colonhash.txt")
+	writeTestFile(t, filePath, "line one\nline two\nline three\n")
+
+	readOut := callRead(t, s, filePath, 0, 0)
+	ref := firstLineRef(t, readOut, "line two")
+	colonRef := strings.Replace(ref, "#", ":", 1)
+
+	editOut := callEdit(t, s, filePath, []editor.Edit{{Type: editor.EditReplace, Anchor: colonRef, Content: strPtr("line 2")}})
+	if !strings.Contains(editOut, "OK:") {
+		t.Fatalf("edit with colon-separated hash ref failed: %s", editOut)
 	}
 	data, _ := os.ReadFile(filePath)
 	if got := string(data); !strings.Contains(got, "line 2") || strings.Contains(got, "line two") {

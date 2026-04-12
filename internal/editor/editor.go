@@ -149,16 +149,21 @@ func preserveSingleLineIndent(originalLine string, replacement []string) []strin
 	return []string{oldIndent + trimmed}
 }
 
-// normalizeRef accepts refs copied directly from lapp_read/lapp_grep output,
-// normalizeRef accepts refs copied directly from lapp_read/lapp_grep output.
+// normalizeRef accepts refs copied or retyped from lapp_read/lapp_grep output.
 // Valid inputs include:
 //   LINE#HASH
 //   LINE#HASH:
 //   LINE#HASH:full line text
+//   LINE:HASH            (model separator mistake; normalized to LINE#HASH)
+//   LINE:HASH:full line  (same, with pasted display content)
 // Special anchors 0: and EOF: are preserved unchanged.
 func normalizeRef(ref string) string {
 	if ref == "0:" || ref == "EOF:" {
 		return ref
+	}
+	// Common model mistake: `245:BS` instead of `245#BS`.
+	if m := regexp.MustCompile(`^(\d+):([A-Z]{2})(:.*)?$`).FindStringSubmatch(ref); m != nil {
+		return m[1] + "#" + m[2]
 	}
 	if !strings.Contains(ref, "#") {
 		return ref
