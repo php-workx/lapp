@@ -70,8 +70,8 @@ PROMPT_B = dedent("""\
     exact content, make the replacement, save it.
     {grep_hint}
     If a change spans multiple lines, prefer lapp_find_block with the exact old
-    block, then use the returned start/end refs in lapp_edit.
-    Do not use a single-anchor replace for a multi-line block.
+    block and normalize_whitespace=true, then use the returned start/end refs in
+    lapp_edit. Do not use a single-anchor replace for a multi-line block.
     No shell commands. Do not explain your steps.
 
     Repository root: {filepath}
@@ -96,8 +96,8 @@ PROMPT_B_OC = dedent("""\
     exact content, make the replacement, save it.
     {grep_hint}
     If a change spans multiple lines, prefer lapp_lapp_find_block with the exact
-    old block, then use the returned start/end refs in lapp_lapp_edit.
-    Do not use a single-anchor replace for a multi-line block.
+    old block and normalize_whitespace=true, then use the returned start/end refs
+    in lapp_lapp_edit. Do not use a single-anchor replace for a multi-line block.
     No shell commands. Do not explain your steps.
 
     Repository root: {filepath}
