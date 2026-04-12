@@ -55,6 +55,7 @@ PROMPT_A = dedent("""\
     Apply the following change to the file. Read the file first to locate the
     exact content, make the replacement, save it.
     Use ONLY the Read and Edit tools. No shell commands.
+    Do not explain your steps.
 
     Repository root: {filepath}
 
@@ -68,7 +69,7 @@ PROMPT_B = dedent("""\
     If a change spans multiple lines, find the FIRST line and LAST line and
     use a range edit with start/end. Do not use a single-anchor replace for a
     multi-line block.
-    No shell commands.
+    No shell commands. Do not explain your steps.
 
     Repository root: {filepath}
 
@@ -80,6 +81,7 @@ PROMPT_A_OC = dedent("""\
     Apply the following change to the file. Read the file first to locate the
     exact content, make the replacement, save it.
     Use ONLY the read and edit tools. No shell commands.
+    Do not explain your steps.
 
     Repository root: {filepath}
 
@@ -93,7 +95,7 @@ PROMPT_B_OC = dedent("""\
     If a change spans multiple lines, find the FIRST line and LAST line and
     use start/end range replacement in lapp_lapp_edit. Do not use a single
     anchor replace for a multi-line block.
-    No shell commands.
+    No shell commands. Do not explain your steps.
 
     Repository root: {filepath}
 
