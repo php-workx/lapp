@@ -101,7 +101,14 @@ def fmt_corr(v):
 
 
 def main():
-    dirs = sys.argv[1:] if len(sys.argv) > 1 else [p.name for p in RESULTS.iterdir() if p.is_dir()]
+    if len(sys.argv) > 1:
+        dirs = sys.argv[1:]
+    else:
+        dirs = [
+            str(p.relative_to(RESULTS))
+            for p in RESULTS.rglob('*')
+            if p.is_dir() and any(p.glob('*.json')) and '_legacy' not in p.parts
+        ]
     print("V1 benchmark summary")
     print("suite, model_dir, pairs, corr(A→B), wall(A→B), turns(A→B), out(A→B), in(A→B)")
     for suite_name in SUITES["suites"]:
@@ -109,7 +116,6 @@ def main():
             rows = load_dir(d)
             if not rows:
                 continue
-            # infer suite from stored metadata if present, otherwise by instance IDs
             row_suite = rows[0].get("suite")
             if row_suite and row_suite != suite_name:
                 continue
@@ -119,11 +125,12 @@ def main():
                 continue
             rows = [r for r in rows if r["instance_id"] in expected]
             s = summarize(rows)
+            model_label = rows[0].get("model", d)
             if not s:
-                print(f"{suite_name}, {d}, 0/{len(expected)}, no complete pairs")
+                print(f"{suite_name}, {model_label}, 0/{len(expected)}, no complete pairs")
                 continue
             print(
-                f"{suite_name}, {d}, {s['pairs']}/{len(expected)}, "
+                f"{suite_name}, {model_label}, {s['pairs']}/{len(expected)}, "
                 f"{fmt_corr(s['a_corr'])}->{fmt_corr(s['b_corr'])} ({fmt_pct(s['d_corr'])}), "
                 f"{fmt_ms(s['a_wall'])}->{fmt_ms(s['b_wall'])} ({fmt_pct(s['d_wall'])}), "
                 f"{s['a_turns']}->{s['b_turns']} ({fmt_pct(s['d_turns'])}), "

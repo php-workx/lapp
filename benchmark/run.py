@@ -34,7 +34,7 @@ from textwrap import dedent
 
 BENCHMARK_DIR = Path(__file__).parent
 FILES_DIR     = BENCHMARK_DIR / "files"
-RESULTS_DIR   = BENCHMARK_DIR / "results" / os.environ.get("RESULTS_SUBDIR", "default")
+RESULTS_BASE  = BENCHMARK_DIR / "results"
 INSTANCES_FILE = BENCHMARK_DIR / "instances.json"
 SUITES_FILE    = BENCHMARK_DIR / "v1_suites.json"
 
@@ -574,6 +574,28 @@ def current_model_name() -> str:
     return OPENCODE_MODEL if AGENT == "opencode" else os.environ.get("CLAUDE_MODEL", "claude")
 
 
+def slug_model_name(name: str) -> str:
+    out = []
+    for ch in name:
+        if ch.isalnum() or ch in {'.', '-'}:
+            out.append(ch)
+        else:
+            out.append('_')
+    slug = ''.join(out).strip('_')
+    while '__' in slug:
+        slug = slug.replace('__', '_')
+    return slug or 'unknown-model'
+
+
+def canonical_results_dir(suite_name: str | None) -> Path:
+    override = os.environ.get("RESULTS_SUBDIR")
+    if override:
+        return RESULTS_BASE / override
+    suite_part = suite_name or 'ad-hoc'
+    model_part = f"{AGENT}__{slug_model_name(current_model_name())}"
+    return RESULTS_BASE / suite_part / model_part
+
+
 def main() -> None:
     if not INSTANCES_FILE.exists():
         print(f"ERROR: instances.json not found — run fetch_instances.py first.",
@@ -609,11 +631,12 @@ def main() -> None:
         print(f"Running {len(instances)} instance(s)")
 
     skip_existing = os.environ.get("SKIP_EXISTING", "1") != "0"
-    RESULTS_DIR.mkdir(exist_ok=True)
+    results_dir = canonical_results_dir(suite_name)
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, instance in enumerate(instances, 1):
         iid = instance["instance_id"]
-        out_path = RESULTS_DIR / f"{iid}.json"
+        out_path = results_dir / f"{iid}.json"
 
         if skip_existing and out_path.exists():
             print(f"  [{idx}/{len(instances)}] {iid}  (skipped)")
@@ -644,8 +667,8 @@ def main() -> None:
                 f"Δ={sign}{delta}"
             )
 
-    print(f"\nResults in {RESULTS_DIR}/")
-    print("Run 'python benchmark/report.py' to see the table.")
+    print(f"\nResults in {results_dir}/")
+    print("Run 'python benchmark/report.py --dir <suite/model> or benchmark/v1_report.py' to see the table.")
 
 
 if __name__ == "__main__":
