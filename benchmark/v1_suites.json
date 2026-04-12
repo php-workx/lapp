@@ -1,0 +1,26 @@
+{
+  "version": "v1",
+  "primary_metrics": [
+    "correctness_similarity",
+    "wall_ms",
+    "num_turns",
+    "output_tokens",
+    "input_tokens"
+  ],
+  "suites": {
+    "targeted-singleline": {
+      "description": "Single-file targeted exact replacements. Agent must read the file and apply a precise one-line change.",
+      "instances": [
+        "astropy__astropy-12907",
+        "django__django-10097"
+      ]
+    },
+    "targeted-multiline-pure-replacement": {
+      "description": "Pure replacement hunks only (no insertion-only/deletion-only benchmark cases). Agent must use range-aware replacement behavior for multiline changes.",
+      "instances": [
+        "pydata__xarray-3151",
+        "pydata__xarray-3095"
+      ]
+    }
+  }
+}

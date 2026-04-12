@@ -21,6 +21,7 @@ Usage:
 """
 
 import copy
+import difflib
 import json
 import os
 import shutil
@@ -35,6 +36,7 @@ BENCHMARK_DIR = Path(__file__).parent
 FILES_DIR     = BENCHMARK_DIR / "files"
 RESULTS_DIR   = BENCHMARK_DIR / "results" / os.environ.get("RESULTS_SUBDIR", "default")
 INSTANCES_FILE = BENCHMARK_DIR / "instances.json"
+SUITES_FILE    = BENCHMARK_DIR / "v1_suites.json"
 
 TIMEOUT   = 120   # seconds per config; >2m for a single-file targeted edit is benchmark-fail
 MAX_TURNS = 20    # upper bound; keeps loops visible while allowing a few retries
@@ -259,6 +261,39 @@ def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
 
 def _indent(text: str) -> str:  # prefix every line with 4 spaces for readability
     return "\n".join(f"    {l}" for l in text.splitlines())
+
+
+def patch_similarity(applied: str, reference: str) -> float:
+    def changed_lines(patch: str) -> list[str]:
+        return [
+            line
+            for line in patch.splitlines()
+            if (line.startswith("+") or line.startswith("-"))
+            and not line.startswith("+++")
+            and not line.startswith("---")
+        ]
+
+    a = changed_lines(applied)
+    b = changed_lines(reference)
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def load_v1_suite(name: str) -> list[str]:
+    data = json.loads(SUITES_FILE.read_text())
+    suites = data.get("suites", {})
+    if name not in suites:
+        raise SystemExit(f"unknown suite {name!r}; available: {', '.join(sorted(suites))}")
+    return suites[name]["instances"]
+
+
+def benchmark_version() -> str:
+    if SUITES_FILE.exists():
+        return json.loads(SUITES_FILE.read_text()).get("version", "ad-hoc")
+    return "ad-hoc"
 
 
 # ---------------------------------------------------------------------------
@@ -526,14 +561,18 @@ def run_instance(instance: dict, lapp_binary: str) -> dict:
         "instance_id":     iid,
         "repo":            instance["repo"],
         "reference_patch": instance["patch"],
-        "a": {**result_a, "diff": diff_a},
-        "b": {**result_b, "diff": diff_b},
+        "a": {**result_a, "diff": diff_a, "correctness_similarity": patch_similarity(diff_a, instance["patch"])},
+        "b": {**result_b, "diff": diff_b, "correctness_similarity": patch_similarity(diff_b, instance["patch"])},
     }
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+def current_model_name() -> str:
+    return OPENCODE_MODEL if AGENT == "opencode" else os.environ.get("CLAUDE_MODEL", "claude")
+
 
 def main() -> None:
     if not INSTANCES_FILE.exists():
@@ -547,6 +586,13 @@ def main() -> None:
               file=sys.stderr)
         sys.exit(1)
 
+    suite_name = None
+    if "--suite" in sys.argv:
+        idx = sys.argv.index("--suite")
+        suite_name = sys.argv[idx + 1]
+        suite_ids = set(load_v1_suite(suite_name))
+        instances = [i for i in instances if i["instance_id"] in suite_ids]
+
     lapp_binary = shutil.which("lapp")
     if not lapp_binary:
         print("ERROR: lapp not in PATH — run: go install ./cmd/lapp",
@@ -557,6 +603,8 @@ def main() -> None:
     if filter_ids:
         instances = [i for i in instances if i["instance_id"] in filter_ids]
         print(f"Subset: {len(instances)} instance(s)")
+    elif suite_name:
+        print(f"Running suite {suite_name}: {len(instances)} instance(s)")
     else:
         print(f"Running {len(instances)} instance(s)")
 
@@ -573,6 +621,10 @@ def main() -> None:
 
         print(f"  [{idx}/{len(instances)}] {iid}")
         result = run_instance(instance, lapp_binary)
+        result.setdefault("benchmark_version", benchmark_version())
+        result.setdefault("suite", suite_name or "ad-hoc")
+        result.setdefault("agent", AGENT)
+        result.setdefault("model", current_model_name())
         out_path.write_text(json.dumps(result, indent=2))
 
         if "error" in result and "a" not in result:
