@@ -89,14 +89,25 @@ func (s *Server) registerTools() {
 
 	// lapp_grep
 	grepTool := mcp.NewTool("lapp_grep",
-		mcp.WithDescription(`Search files for a pattern and return matches with LINE#HASH references. Use the returned references directly in lapp_edit without a separate lapp_read call. Use literal=true when searching for code that contains regex special characters such as ( ) \ . + * ? [ ] ^ $ |`),
+		mcp.WithDescription(`Search files for a pattern and return matches with LINE#HASH references. Use the returned references directly in lapp_edit without a separate lapp_read call. Use literal=true when searching for code that contains regex special characters such as ( ) \ . + * ? [ ] ^ $ |. Use format=structured for machine-readable anchors, line text, and context.`),
 		mcp.WithString("pattern", mcp.Required(), mcp.Description("Pattern to search for. Interpreted as a regex unless literal=true")),
 		mcp.WithString("path", mcp.Description("File or directory to search (defaults to root)")),
 		mcp.WithNumber("context", mcp.Description("Lines of context around matches (default: 2)")),
 		mcp.WithBoolean("literal", mcp.Description("If true, treat pattern as a fixed string (no regex interpretation). Use when the search term contains code or regex metacharacters")),
+		mcp.WithString("format", mcp.Description("Output format: text (default) or structured")),
 	)
 	s.mcpS.AddTool(grepTool, s.handleGrep)
+
+	// lapp_find_block
+ 	findBlockTool := mcp.NewTool("lapp_find_block",
+		mcp.WithDescription(`Find an exact multi-line code block in a file and return start/end LINE#HASH references usable directly in lapp_edit. Use this for multi-line replacements where grepping the first and last line separately is ambiguous.`),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the file to search")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("Exact block content to find. Preserve indentation and line breaks exactly.")),
+		mcp.WithBoolean("literal", mcp.Description("If true, treat content as a literal block (default true). Regex block search is not currently supported.")),
+	)
+	s.mcpS.AddTool(findBlockTool, s.handleFindBlock)
 }
+
 
 func (s *Server) handleRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
@@ -203,7 +214,7 @@ func (s *Server) handleEdit(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	newLines, result, errCode, errDetail := editor.ApplyEdits(fd, editReq)
 
 	if errCode == "SELF_CORRECT" {
-		sc := editor.BuildSelfCorrectResult(fd.Lines, s.cfg.DefaultLimit)
+		sc := editor.BuildSelfCorrectResult(fd.Lines, s.cfg.DefaultLimit, errDetail)
 		jsonBytes, _ := json.Marshal(sc)
 		return mcp.NewToolResultText(string(jsonBytes)), nil
 	}
@@ -363,6 +374,16 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		ctxLines = maxCtxLines
 	}
 
+	format := "text"
+	if v, ok := args["format"]; ok {
+		if s, ok2 := v.(string); ok2 && s != "" {
+			format = s
+		}
+	}
+	if format != "text" && format != "structured" {
+		return mcp.NewToolResultError("invalid format: must be text or structured"), nil
+	}
+
 	literal := false
 	if v, ok := args["literal"]; ok {
 		if b, ok2 := v.(bool); ok2 && b {
@@ -379,8 +400,6 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	}
 
 	const maxGrepFiles = 100
-	// Cap output lines at DefaultLimit (same as lapp_read) to keep MCP
-	// responses within context-window budget. Spec §10, §5.5.
 	maxOutputLines := s.cfg.DefaultLimit
 	if maxOutputLines <= 0 {
 		maxOutputLines = 2000
@@ -389,8 +408,8 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	var sb strings.Builder
 	filesMatched := 0
 	outputLines := 0
+	var structuredMatches []grepStructuredMatch
 
-	// errCapReached is a sentinel returned from WalkDir to stop early.
 	errCapReached := errors.New("grep cap reached")
 
 	walkErr := filepath.WalkDir(searchRoot, func(filePath string, d os.DirEntry, e error) error {
@@ -400,17 +419,14 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		if d.IsDir() {
 			return nil
 		}
-		if filesMatched >= maxGrepFiles || outputLines >= maxOutputLines {
+		if filesMatched >= maxGrepFiles || (format == "text" && outputLines >= maxOutputLines) {
 			return errCapReached
 		}
 
-		// Per-file security: resolve symlinks, verify root containment, check block list.
 		canonical, errCode := fileio.CheckPath(filePath, s.cfg, true)
 		if errCode != "" {
 			return nil
 		}
-
-		// Use fileio.ReadFile for BOM stripping, binary detection, and encoding validation.
 		fd, errCode := fileio.ReadFile(canonical, s.cfg)
 		if errCode != "" {
 			return nil
@@ -440,10 +456,31 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		}
 
 		filesMatched++
+		if format == "structured" {
+			for _, m := range matches {
+				before := []string{}
+				after := []string{}
+				for k := max(1, m-ctxLines); k < m; k++ {
+					before = append(before, hashline.FormatLine(lines[k-1], k))
+				}
+				for k := m + 1; k <= min(len(lines), m+ctxLines); k++ {
+					after = append(after, hashline.FormatLine(lines[k-1], k))
+				}
+				structuredMatches = append(structuredMatches, grepStructuredMatch{
+					Path: canonical,
+					Anchor: fmt.Sprintf("%d#%s", m, hashline.HashLine(lines[m-1], m)),
+					LineNumber: m,
+					Line: lines[m-1],
+					ContextBefore: before,
+					ContextAfter: after,
+				})
+			}
+			return nil
+		}
+
 		sb.WriteString(filePath + ":\n")
 		outputLines++
 
-		// Build display set: matched lines ± ctxLines context.
 		display := make(map[int]bool)
 		for _, m := range matches {
 			for k := m - ctxLines; k <= m+ctxLines; k++ {
@@ -468,7 +505,7 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			}
 			if prev > 0 && k > prev+1 {
 				sb.WriteString("    ...\n")
-				outputLines++ // separator counts toward cap
+				outputLines++
 			}
 			prefix := "    "
 			if matchSet[k] {
@@ -484,6 +521,10 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	if walkErr != nil && walkErr != errCapReached {
 		return mcp.NewToolResultError("grep error: " + walkErr.Error()), nil
 	}
+	if format == "structured" {
+		jsonBytes, _ := json.Marshal(grepStructuredResult{Matches: structuredMatches})
+		return mcp.NewToolResultText(string(jsonBytes)), nil
+	}
 	if walkErr == errCapReached {
 		sb.WriteString(fmt.Sprintf("\n[Results truncated: showed %d files / %d lines. Narrow your pattern or path.]", filesMatched, outputLines))
 	}
@@ -493,4 +534,100 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		result = "No matches found."
 	}
 	return mcp.NewToolResultText(result), nil
+}
+
+
+type blockMatch struct {
+	Path    string   `json:"path"`
+	Start   string   `json:"start"`
+	End     string   `json:"end"`
+	Preview []string `json:"preview"`
+}
+
+type findBlockResult struct {
+	Matches []blockMatch `json:"matches"`
+}
+
+type grepStructuredMatch struct {
+	Path          string   `json:"path"`
+	Anchor        string   `json:"anchor"`
+	LineNumber    int      `json:"line_number"`
+	Line          string   `json:"line"`
+	ContextBefore []string `json:"context_before"`
+	ContextAfter  []string `json:"context_after"`
+}
+
+type grepStructuredResult struct {
+	Matches []grepStructuredMatch `json:"matches"`
+}
+
+func splitSearchContent(content string) []string {
+	content = editor.NormalizeNewlines(content)
+	parts := strings.Split(content, "\n")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	return parts
+}
+
+func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	content, err := req.RequireString("content")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	args := req.GetArguments()
+	literal := true
+	if v, ok := args["literal"]; ok {
+		if b, ok2 := v.(bool); ok2 {
+			literal = b
+		}
+	}
+	if !literal {
+		return mcp.NewToolResultError("regex block search not supported; use literal=true"), nil
+	}
+
+	canonical, errCode := fileio.CheckPath(path, s.cfg, true)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	fd, errCode := fileio.ReadFile(canonical, s.cfg)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	needle := splitSearchContent(content)
+	if len(needle) == 0 {
+		return mcp.NewToolResultError("content parameter required"), nil
+	}
+	lines := fd.Lines
+	var matches []blockMatch
+	for i := 0; i+len(needle) <= len(lines); i++ {
+		ok := true
+		for j := range needle {
+			if lines[i+j] != needle[j] {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		startLine := i + 1
+		endLine := i + len(needle)
+		preview := make([]string, 0, len(needle))
+		for k := startLine; k <= endLine; k++ {
+			preview = append(preview, hashline.FormatLine(lines[k-1], k))
+		}
+		matches = append(matches, blockMatch{
+			Path: canonical,
+			Start: fmt.Sprintf("%d#%s", startLine, hashline.HashLine(lines[startLine-1], startLine)),
+			End: fmt.Sprintf("%d#%s", endLine, hashline.HashLine(lines[endLine-1], endLine)),
+			Preview: preview,
+		})
+	}
+	jsonBytes, _ := json.Marshal(findBlockResult{Matches: matches})
+	return mcp.NewToolResultText(string(jsonBytes)), nil
 }

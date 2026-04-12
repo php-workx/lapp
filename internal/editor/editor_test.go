@@ -382,7 +382,7 @@ func TestNormalizeNewlines(t *testing.T) {
 
 func TestBuildSelfCorrectResult(t *testing.T) {
 	lines := []string{"func main() {", "    fmt.Println(\"hello\")", "}"}
-	result := editor.BuildSelfCorrectResult(lines, 100)
+	result := editor.BuildSelfCorrectResult(lines, 100, "")
 	if result.Status != "needs_read_first" {
 		t.Errorf("Status = %q, want needs_read_first", result.Status)
 	}
@@ -391,6 +391,14 @@ func TestBuildSelfCorrectResult(t *testing.T) {
 	}
 	if !strings.Contains(result.FileContent, "1#") {
 		t.Error("FileContent should contain hashline refs")
+	}
+}
+
+func TestBuildSelfCorrectResult_UsesExplicitMessage(t *testing.T) {
+	lines := []string{"a", "b"}
+	result := editor.BuildSelfCorrectResult(lines, 100, "Ref \"245\" is missing the #HASH part.")
+	if result.Message != "Ref \"245\" is missing the #HASH part." {
+		t.Fatalf("Message = %q", result.Message)
 	}
 }
 

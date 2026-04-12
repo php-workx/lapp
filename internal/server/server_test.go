@@ -123,6 +123,54 @@ func callGrepLiteral(t *testing.T, s *Server, pattern, searchPath string) string
 	return extractText(t, result)
 }
 
+
+func callGrepStructured(t *testing.T, s *Server, pattern, searchPath string) string {
+	t.Helper()
+	args := map[string]any{"pattern": pattern, "format": "structured"}
+	if searchPath != "" {
+		args["path"] = searchPath
+	}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	result, err := s.handleGrep(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleGrep (structured) error: %v", err)
+	}
+	return extractText(t, result)
+}
+
+type parsedStructuredGrep struct {
+	Matches []struct {
+		Path          string   `json:"path"`
+		Anchor        string   `json:"anchor"`
+		LineNumber    int      `json:"line_number"`
+		Line          string   `json:"line"`
+		ContextBefore []string `json:"context_before"`
+		ContextAfter  []string `json:"context_after"`
+	} `json:"matches"`
+}
+
+func callFindBlock(t *testing.T, s *Server, filePath, content string) string {
+	t.Helper()
+	args := map[string]any{"path": filePath, "content": content, "literal": true}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	result, err := s.handleFindBlock(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleFindBlock error: %v", err)
+	}
+	return extractText(t, result)
+}
+
+type parsedFindBlock struct {
+	Matches []struct {
+		Path    string   `json:"path"`
+		Start   string   `json:"start"`
+		End     string   `json:"end"`
+		Preview []string `json:"preview"`
+	} `json:"matches"`
+}
+
 // TestGrepLiteralMatchesRegexMetachars verifies that literal=true treats the
 // pattern as a fixed string so code containing regex metacharacters like
 // \S+, (?:...), and @? is found correctly — the exact failure seen in the
@@ -191,6 +239,111 @@ func TestGrepLiteralMatchesRegexEscapedPunctuation(t *testing.T) {
 	litOut := callGrepLiteral(t, s, pat, filePath)
 	if !strings.Contains(litOut, `cright[-right.shape[0]:, -right.shape[1]:] = 1`) {
 		t.Errorf("literal grep did not normalize regex-escaped punctuation:\n%s", litOut)
+	}
+}
+
+
+func TestGrepStructuredReturnsAnchorAndContext(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "structured.go")
+	writeTestFile(t, filePath, "package p\nfunc f() {\n    target()\n}\n")
+
+	out := callGrepStructured(t, s, "target()", filePath)
+	var got parsedStructuredGrep
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, out)
+	}
+	if len(got.Matches) != 1 {
+		t.Fatalf("expected 1 match, got %d: %s", len(got.Matches), out)
+	}
+	m := got.Matches[0]
+	if m.Anchor == "" || m.LineNumber != 3 || m.Line != "    target()" {
+		t.Fatalf("unexpected structured match: %+v", m)
+	}
+	if len(m.ContextBefore) == 0 || len(m.ContextAfter) == 0 {
+		t.Fatalf("expected surrounding context, got: %+v", m)
+	}
+}
+
+func TestGrepStructuredMultipleMatches(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "multi.go")
+	writeTestFile(t, filePath, "a\ntarget\nb\ntarget\nc\n")
+
+	out := callGrepStructured(t, s, "target", filePath)
+	var got parsedStructuredGrep
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, out)
+	}
+	if len(got.Matches) != 2 {
+		t.Fatalf("expected 2 matches, got %d: %s", len(got.Matches), out)
+	}
+	if got.Matches[0].LineNumber != 2 || got.Matches[1].LineNumber != 4 {
+		t.Fatalf("unexpected line numbers: %+v", got.Matches)
+	}
+}
+
+
+func TestFindBlockExactMultilineMatch(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "block.py")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\ndelta\n")
+
+	out := callFindBlock(t, s, filePath, "beta\ngamma")
+	var got parsedFindBlock
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, out)
+	}
+	if len(got.Matches) != 1 {
+		t.Fatalf("expected 1 match, got %d: %s", len(got.Matches), out)
+	}
+	if got.Matches[0].Start == "" || got.Matches[0].End == "" {
+		t.Fatalf("missing start/end refs: %s", out)
+	}
+	if got.Matches[0].Start != "2#QQ" && !strings.HasPrefix(got.Matches[0].Start, "2#") {
+		// line number must be correct; hash value may change if hashing implementation changes.
+		t.Fatalf("unexpected start ref: %s", got.Matches[0].Start)
+	}
+	if !strings.Contains(strings.Join(got.Matches[0].Preview, "\n"), "beta") || !strings.Contains(strings.Join(got.Matches[0].Preview, "\n"), "gamma") {
+		t.Fatalf("preview missing matched lines: %s", out)
+	}
+}
+
+func TestFindBlockDisambiguatesRepeatedFirstLine(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "repeat.py")
+	writeTestFile(t, filePath, "same\nkeep\nsame\ntarget\nend\n")
+
+	out := callFindBlock(t, s, filePath, "same\ntarget")
+	var got parsedFindBlock
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, out)
+	}
+	if len(got.Matches) != 1 {
+		t.Fatalf("expected 1 match, got %d: %s", len(got.Matches), out)
+	}
+	if !strings.HasPrefix(got.Matches[0].Start, "3#") || !strings.HasPrefix(got.Matches[0].End, "4#") {
+		t.Fatalf("expected match on lines 3-4, got start=%s end=%s", got.Matches[0].Start, got.Matches[0].End)
+	}
+}
+
+func TestFindBlockNoMatchReturnsEmptyMatches(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "nomatch.py")
+	writeTestFile(t, filePath, "one\ntwo\nthree\n")
+
+	out := callFindBlock(t, s, filePath, "missing\nblock")
+	var got parsedFindBlock
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, out)
+	}
+	if len(got.Matches) != 0 {
+		t.Fatalf("expected 0 matches, got %d: %s", len(got.Matches), out)
 	}
 }
 
@@ -351,6 +504,66 @@ func TestRoundTrip_ReadEditAcceptsColonSuffixedRangeRefs(t *testing.T) {
 	}
 }
 
+
+func TestRoundTrip_ReadEditAcceptsFullDisplayLineAnchor(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "anchor-displayline.txt")
+	writeTestFile(t, filePath, "line one\nline two\nline three\n")
+
+	readOut := callRead(t, s, filePath, 0, 0)
+	anchor := ""
+	for _, line := range strings.Split(readOut, "\n") {
+		if strings.Contains(line, "line two") {
+			anchor = line // full LINE#HASH:CONTENT line
+			break
+		}
+	}
+	if anchor == "" {
+		t.Fatalf("failed to capture display line from read output: %s", readOut)
+	}
+
+	editOut := callEdit(t, s, filePath, []editor.Edit{{Type: editor.EditReplace, Anchor: anchor, Content: strPtr("line 2")}})
+	if !strings.Contains(editOut, "OK:") {
+		t.Fatalf("edit with full display-line anchor failed: %s", editOut)
+	}
+	data, _ := os.ReadFile(filePath)
+	if got := string(data); !strings.Contains(got, "line 2") || strings.Contains(got, "line two") {
+		t.Fatalf("file not updated correctly: %s", got)
+	}
+}
+
+func TestRoundTrip_ReadEditAcceptsFullDisplayLineRangeRefs(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "range-displayline.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\ndelta\n")
+
+	readOut := callRead(t, s, filePath, 0, 0)
+	var start, end string
+	for _, line := range strings.Split(readOut, "\n") {
+		if strings.Contains(line, "beta") {
+			start = line
+		}
+		if strings.Contains(line, "gamma") {
+			end = line
+		}
+	}
+	if start == "" || end == "" {
+		t.Fatalf("failed to capture display lines from read output: %s", readOut)
+	}
+
+	editOut := callEdit(t, s, filePath, []editor.Edit{{Type: editor.EditReplace, Start: start, End: end, Content: strPtr("BETA\nGAMMA")}})
+	if !strings.Contains(editOut, "OK:") {
+		t.Fatalf("edit with full display-line range refs failed: %s", editOut)
+	}
+	data, _ := os.ReadFile(filePath)
+	got := string(data)
+	if !strings.Contains(got, "BETA\nGAMMA") || strings.Contains(got, "beta") || strings.Contains(got, "gamma") {
+		t.Fatalf("file not updated correctly: %s", got)
+	}
+}
+
 // 2. Stale ref → mismatch error → extract updated ref → retry succeeds.
 func TestRoundTrip_StaleRefThenCorrect(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -459,6 +672,26 @@ func TestRoundTrip_SelfCorrect_NoteAlwaysSet(t *testing.T) {
 	}
 	if sc.Note == "" {
 		t.Fatal("SelfCorrectResult.Note must always be non-empty")
+	}
+}
+
+func TestRoundTrip_SelfCorrectMissingHashMessage(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+
+	filePath := filepath.Join(cfg.Root, "sc-missing-hash.txt")
+	writeTestFile(t, filePath, "foo\nbar\nbaz\n")
+
+	editOut := callEdit(t, s, filePath, []editor.Edit{
+		{Type: editor.EditReplace, Anchor: "245", Content: strPtr("quux")},
+	})
+
+	var sc editor.SelfCorrectResult
+	if err := json.Unmarshal([]byte(editOut), &sc); err != nil {
+		t.Fatalf("expected SelfCorrectResult JSON, got: %s\nerr: %v", editOut, err)
+	}
+	if !strings.Contains(sc.Message, "missing the #HASH part") {
+		t.Fatalf("expected missing-hash guidance, got: %s", sc.Message)
 	}
 }
 
