@@ -273,10 +273,16 @@ def main() -> None:
             if isinstance(row.get("b"), dict):
                 b_metrics, b_err = from_result(row["b"])
 
+            # Use the native A-side once per case/model. Variant directories contain the same A-side baseline,
+            # so guard by instance_id to avoid duplicating the baseline when multiple strategy dirs exist.
             if a_metrics is not None:
-                model_results["native-edit"].append(a_metrics)
-                if a_err:
-                    model_status["native-edit"].append(f"A-ERR: {truncate(a_err)}")
+                seen_native = model_status.setdefault("__seen_native__", [])
+                native_key = row.get("instance_id")
+                if native_key not in seen_native:
+                    model_results["native-edit"].append(a_metrics)
+                    seen_native.append(native_key)
+                    if a_err:
+                        model_status["native-edit"].append(f"A-ERR: {truncate(a_err)}")
 
             # Legacy/partial compatibility: if row is side-less but still contains metrics,
             # treat it as native (best-effort; this should not happen for milestone data).
