@@ -1,6 +1,6 @@
 ---
 id: lap-g1v6
-status: open
+status: closed
 deps: [lap-jwqr]
 links: []
 created: 2026-04-13T11:00:56Z
