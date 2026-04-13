@@ -1,0 +1,34 @@
+{
+  "version": "v2",
+  "primary_metrics": [
+    "correctness_similarity",
+    "wall_ms",
+    "num_turns",
+    "output_tokens",
+    "input_tokens"
+  ],
+  "dimensions": [
+    "file_size_bucket",
+    "change_count_bucket",
+    "strategy"
+  ],
+  "suites": {
+    "v2-bulk-edits-same-file": {
+      "description": "Milestone 1 V2 suite with same-file bulk edits on a large file.",
+      "instances": [
+        "mwaskom__seaborn-3069"
+      ],
+      "metadata": {
+        "file_size_bucket": "large",
+        "change_count_bucket": "3-5",
+        "file_count": 1
+      },
+      "strategies": [
+        "native-edit",
+        "lapp-text-grep",
+        "lapp-structured-grep",
+        "lapp-replace-block"
+      ]
+    }
+  }
+}

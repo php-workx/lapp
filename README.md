@@ -50,6 +50,21 @@ This project uses lapp for file editing. Prefer lapp_read / lapp_edit / lapp_wri
 
 lapp emits this hint to stderr on startup as a reminder.
 
+## Design Principles
+
+> Inspired by what editing-focused systems such as Cursor's "Instant Apply" make explicit:
+> planning and applying are different problems.
+
+lapp is deliberately optimized for the **apply** stage of coding agents:
+- **Planning stays outside lapp.** A frontier model or chat loop decides *what* to change.
+- **Applying stays deterministic.** lapp reads, locates, and edits with hash-verified refs.
+- **Higher-order edit helpers matter.** `lapp_find_block` and `lapp_replace_block` reduce fragile multi-step choreography that weaker models struggle with.
+- **Optimize for accuracy and latency together.** The benchmark treats correctness, wall time, turn count, and token count as first-class metrics.
+- **Prefer local retries over broad rereads.** Stale refs return small structured repair payloads so the model can retry with fresh local anchors instead of starting over.
+
+This is why the benchmark does **not** ask models to debug issues from scratch. It gives them real files and concrete changes so we can measure the apply system itself, not general coding ability.
+
+
 ## Tools
 
 ### `lapp_read`
