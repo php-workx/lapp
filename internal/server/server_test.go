@@ -692,27 +692,21 @@ func TestRoundTrip_StaleRefThenCorrect(t *testing.T) {
 	// Mutate the file externally — "beta" becomes "BETA" so the hash changes.
 	writeTestFile(t, filePath, "alpha\nBETA\ngamma\n")
 
-	// Attempt edit with stale ref — expect hash mismatch.
+	// Attempt edit with stale ref — expect structured stale-ref payload.
 	editOut := callEdit(t, s, filePath, []editor.Edit{
 		{Type: editor.EditReplace, Anchor: staleRef, Content: strPtr("replaced")},
 	})
-	if !strings.Contains(editOut, "ERR_HASH_MISMATCH") && !strings.Contains(editOut, "changed since") {
-		t.Fatalf("expected hash mismatch error, got: %s", editOut)
+	var payload editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(editOut), &payload); err != nil {
+		t.Fatalf("expected stale repair JSON, got: %s\nerr: %v", editOut, err)
 	}
-
-	// Extract updated ref from the remapping table in the error.
-	// FormatMismatchError emits "  N#OLD → N#NEW" lines.
-	updatedRef := ""
-	re := regexp.MustCompile(`→\s+(\d+#[A-Z]{2})`)
-	for _, line := range strings.Split(editOut, "\n") {
-		if m := re.FindStringSubmatch(line); m != nil {
-			updatedRef = m[1]
-			break
-		}
+	if payload.Status != "stale_refs" || payload.ErrorCode != editor.ErrHashMismatch {
+		t.Fatalf("unexpected stale payload: %+v", payload)
 	}
-	if updatedRef == "" {
-		t.Fatalf("could not extract updated ref from: %s", editOut)
+	if len(payload.Changed) == 0 {
+		t.Fatalf("missing changed anchors in payload: %+v", payload)
 	}
+	updatedRef := payload.Changed[0].Anchor
 
 	// Retry with updated ref.
 	editOut2 := callEdit(t, s, filePath, []editor.Edit{
@@ -805,6 +799,54 @@ func TestRoundTrip_SelfCorrectMissingHashMessage(t *testing.T) {
 	}
 	if !strings.Contains(sc.Message, "missing the #HASH part") {
 		t.Fatalf("expected missing-hash guidance, got: %s", sc.Message)
+	}
+}
+
+func TestRoundTrip_StaleRefReturnsStructuredRepairPayload(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "stale-structured.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\n")
+
+	readOut := callRead(t, s, filePath, 0, 0)
+	staleRef := firstLineRef(t, readOut, "beta")
+	writeTestFile(t, filePath, "alpha\nBETA\ngamma\n")
+
+	editOut := callEdit(t, s, filePath, []editor.Edit{{Type: editor.EditReplace, Anchor: staleRef, Content: strPtr("replaced")}})
+	var payload editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(editOut), &payload); err != nil {
+		t.Fatalf("expected stale repair JSON, got: %s\nerr: %v", editOut, err)
+	}
+	if payload.Status != "stale_refs" || payload.ErrorCode != editor.ErrHashMismatch {
+		t.Fatalf("unexpected stale payload: %+v", payload)
+	}
+	if len(payload.Changed) == 0 || payload.Changed[0].Anchor == "" {
+		t.Fatalf("missing changed anchors in payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Changed[0].Line, "BETA") {
+		t.Fatalf("expected updated line content in payload: %+v", payload)
+	}
+}
+
+func TestReplaceBlockStaleReturnsStructuredRepairPayload(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "replace-stale.py")
+	writeTestFile(t, filePath, "class A:\n    def f(self):\n        x = 1\n        return x\n")
+
+	oldBlock := "        x = 1\n        return x"
+	writeTestFile(t, filePath, "class A:\n    def f(self):\n        x = 2\n        return x\n")
+
+	out := callReplaceBlock(t, s, filePath, oldBlock, "        x = right\n        return x")
+	var payload editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("expected stale repair JSON, got: %s\nerr: %v", out, err)
+	}
+	if payload.Status != "stale_refs" || len(payload.Changed) == 0 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Changed[0].Line, "x = 2") {
+		t.Fatalf("expected changed block line in payload: %+v", payload)
 	}
 }
 

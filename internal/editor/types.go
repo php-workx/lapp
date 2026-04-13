@@ -18,6 +18,7 @@ const (
 	ErrTooManyEdits     = "ERR_TOO_MANY_EDITS"
 	ErrLocked           = "ERR_LOCKED"
 	ErrHashMismatch     = "ERR_HASH_MISMATCH"
+	ErrStaleRefs        = "STALE_REFS"
 )
 
 // EditType identifies the kind of mutation an Edit performs.
@@ -70,5 +71,23 @@ type SelfCorrectResult struct {
 	// This results in slightly more aggressive escalation: acceptable trade-off.
 	// Spec deviation documented: pm-20260404-004.
 	Note string `json:"note,omitempty"`
+}
+
+// StaleRefRepairResult is returned when refs are valid in shape but stale
+// against the current file contents. It carries fresh local anchors so the
+// model can retry without rereading the full file.
+type StaleRefRepairResult struct {
+	Status    string                `json:"status"`      // always "stale_refs"
+	ErrorCode string                `json:"error_code"`  // usually ERR_HASH_MISMATCH
+	Message   string                `json:"message"`
+	Count     int                   `json:"count"`
+	Changed   []StaleRefRepairLine  `json:"changed"`
+	Note      string                `json:"note,omitempty"`
+}
+
+type StaleRefRepairLine struct {
+	Anchor     string `json:"anchor"`
+	LineNumber int    `json:"line_number"`
+	Line       string `json:"line"`
 }
 

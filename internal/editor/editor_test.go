@@ -1,6 +1,7 @@
 package editor_test
 
 import (
+	"encoding/json"
 	"io/fs"
 	"strings"
 	"testing"
@@ -236,14 +237,15 @@ func TestApplyEdits_HashMismatch(t *testing.T) {
 	_, _, code, detail := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
 		{Type: editor.EditReplace, Anchor: badRef, Content: strPtr("x")},
 	}))
-	if code != editor.ErrHashMismatch {
-		t.Errorf("expected ErrHashMismatch, got %s", code)
+	if code != editor.ErrStaleRefs {
+		t.Errorf("expected ErrStaleRefs, got %s", code)
 	}
-	if !strings.Contains(detail, ">>>") {
-		t.Errorf("expected >>> marker in mismatch error, got: %s", detail)
+	var payload editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(detail), &payload); err != nil {
+		t.Fatalf("expected stale payload JSON, got: %s\nerr: %v", detail, err)
 	}
-	if !strings.Contains(detail, "Stale → Current:") {
-		t.Errorf("expected remap table in mismatch error")
+	if payload.Status != "stale_refs" || payload.ErrorCode != editor.ErrHashMismatch || len(payload.Changed) == 0 {
+		t.Fatalf("unexpected stale payload: %+v", payload)
 	}
 }
 
@@ -441,8 +443,8 @@ func TestBlankLinePositionSensitivity(t *testing.T) {
 		{Type: editor.EditDelete, Anchor: blankRef},
 	})
 	_, _, code2, _ := editor.ApplyEdits(fd2, req2)
-	if code2 != editor.ErrHashMismatch {
-		t.Errorf("expected ErrHashMismatch after line shift, got %s", code2)
+	if code2 != editor.ErrStaleRefs {
+		t.Errorf("expected ErrStaleRefs after line shift, got %s", code2)
 	}
 }
 
@@ -539,11 +541,15 @@ func TestApplyEdits_HashMismatchNotLineOutOfRange(t *testing.T) {
 	fd := makeFileData(lines)
 	// Line 3 exists but hash is wrong — must be ERR_HASH_MISMATCH, not out-of-range.
 	badRef := strings.Replace(ref(lines, 3), ref(lines, 3)[strings.Index(ref(lines, 3), "#")+1:], "ZZ", 1)
-	_, _, code, _ := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
+	_, _, code, detail := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
 		{Type: editor.EditDelete, Anchor: badRef},
 	}))
-	if code != editor.ErrHashMismatch {
-		t.Errorf("expected ErrHashMismatch for valid line with wrong hash, got %s", code)
+	if code != editor.ErrStaleRefs {
+		t.Errorf("expected ErrStaleRefs for valid line with wrong hash, got %s", code)
+	}
+	var payload editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(detail), &payload); err != nil {
+		t.Fatalf("expected stale payload JSON, got: %s\nerr: %v", detail, err)
 	}
 }
 

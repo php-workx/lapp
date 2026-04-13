@@ -20,7 +20,7 @@ Load via `instructions` array — always active, no skill load needed.
 
 **Full-read:** `lapp_read` → pick refs → `lapp_edit` (batch all edits in one call)
 
-**Hash mismatch:** use the remapping table in the error, retry immediately — do not re-read.
+**Hash mismatch / stale refs:** if lapp returns `stale_refs`, retry with the returned local anchors — do not re-read the whole file.
 
 ## Rules
 

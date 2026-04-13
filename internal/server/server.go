@@ -229,6 +229,9 @@ func (s *Server) handleEdit(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		jsonBytes, _ := json.Marshal(sc)
 		return mcp.NewToolResultText(string(jsonBytes)), nil
 	}
+	if errCode == editor.ErrStaleRefs {
+		return mcp.NewToolResultText(errDetail), nil
+	}
 
 	if errCode != "" {
 		msg := errCode
@@ -674,6 +677,44 @@ func findBlockRanges(lines, needle []string, normalizeWhitespace bool) []blockRa
 	return matches
 }
 
+func bestSimilarBlockRange(lines, needle []string, normalizeWhitespace bool) (blockRange, []int, bool) {
+	if len(needle) == 0 || len(lines) < len(needle) {
+		return blockRange{}, nil, false
+	}
+	needleNorm := needle
+	if normalizeWhitespace {
+		needleNorm = stripSharedIndent(needle)
+	}
+	bestScore := -1
+	var best blockRange
+	var bestMismatch []int
+	for i := 0; i+len(needle) <= len(lines); i++ {
+		window := lines[i : i+len(needle)]
+		windowCmp := window
+		if normalizeWhitespace {
+			windowCmp = stripSharedIndent(window)
+		}
+		score := 0
+		mismatch := []int{}
+		for j := range needleNorm {
+			if windowCmp[j] == needleNorm[j] {
+				score++
+			} else {
+				mismatch = append(mismatch, i+j+1)
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			best = blockRange{start: i + 1, end: i + len(needle)}
+			bestMismatch = mismatch
+		}
+	}
+	if bestScore <= 0 || len(bestMismatch) == 0 {
+		return blockRange{}, nil, false
+	}
+	return best, bestMismatch, true
+}
+
 type blockRange struct {
 	start int
 	end   int
@@ -777,6 +818,30 @@ func (s *Server) handleReplaceBlock(ctx context.Context, req mcp.CallToolRequest
 	}
 	ranges := findBlockRanges(fd.Lines, needle, normalizeWhitespace)
 	if len(ranges) == 0 {
+		if best, mismatchLines, ok := bestSimilarBlockRange(fd.Lines, needle, normalizeWhitespace); ok {
+			changed := make([]editor.StaleRefRepairLine, 0, len(mismatchLines))
+			for _, lineNum := range mismatchLines {
+				if lineNum < 1 || lineNum > len(fd.Lines) {
+					continue
+				}
+				line := fd.Lines[lineNum-1]
+				changed = append(changed, editor.StaleRefRepairLine{
+					Anchor: fmt.Sprintf("%d#%s", lineNum, hashline.HashLine(line, lineNum)),
+					LineNumber: lineNum,
+					Line: line,
+				})
+			}
+			payload := editor.StaleRefRepairResult{
+				Status: "stale_refs",
+				ErrorCode: editor.ErrHashMismatch,
+				Message: "Target block changed since last read. Retry with the updated refs below.",
+				Count: len(changed),
+				Changed: changed,
+				Note: fmt.Sprintf("Closest matching region is lines %d-%d. Use the returned anchors to re-read or rebuild the replacement block.", best.start, best.end),
+			}
+			jsonBytes, _ := json.Marshal(payload)
+			return mcp.NewToolResultText(string(jsonBytes)), nil
+		}
 		return mcp.NewToolResultError("old block not found"), nil
 	}
 	if len(ranges) > 1 {
@@ -794,6 +859,9 @@ func (s *Server) handleReplaceBlock(ctx context.Context, req mcp.CallToolRequest
 	edits := []editor.Edit{{Type: editor.EditReplace, Start: startRef, End: endRef, Content: &adjustedNewContent}}
 	editReq := &editor.EditRequest{Path: path, Edits: edits}
 	newLines, result, errCode, errDetail := editor.ApplyEdits(fd, editReq)
+	if errCode == editor.ErrStaleRefs {
+		return mcp.NewToolResultText(errDetail), nil
+	}
 	if errCode != "" {
 		msg := errCode
 		if errDetail != "" {
