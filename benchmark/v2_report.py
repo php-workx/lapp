@@ -90,19 +90,17 @@ def parse_suite() -> dict[str, object]:
 def supported_strategies(suite: dict[str, object]) -> list[str]:
     """Resolve supported strategies from the manifest when present."""
 
-    metadata = suite.get("metadata")
-    if isinstance(metadata, dict):
-        raw = metadata.get("strategy")
-        if isinstance(raw, list):
-            clean = [
-                s
-                for s in raw
-                if isinstance(s, str)
-                and s.strip()
-                and s.strip() in FALLBACK_STRATEGIES
-            ]
-            if clean:
-                return dedupe(clean)
+    raw = suite.get("strategies")
+    if isinstance(raw, list):
+        clean = [
+            s
+            for s in raw
+            if isinstance(s, str)
+            and s.strip()
+            and s.strip() in FALLBACK_STRATEGIES
+        ]
+        if clean:
+            return dedupe(clean)
 
     return FALLBACK_STRATEGIES
 
