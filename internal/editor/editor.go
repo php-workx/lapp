@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
@@ -217,8 +218,9 @@ func ValidateEdits(edits []Edit, lines []string) ([]parsedEdit, string, string) 
 				"line(s) %s out of range (file has %d lines); re-read the file to get current line numbers",
 				strings.Join(outOfRange, ", "), len(lines))
 		}
-		// All mismatches are hash-only: file content changed. Provide remapping.
-		return nil, ErrHashMismatch, FormatMismatchError(mismatches, lines)
+		repair := BuildStaleRefRepairResult(mismatches, lines)
+		jsonBytes, _ := json.Marshal(repair)
+		return nil, ErrStaleRefs, string(jsonBytes)
 	}
 
 	return parsed, "", ""
@@ -460,6 +462,33 @@ func FormatMismatchError(mismatches []RefMismatch, lines []string) string {
 	}
 
 	return sb.String()
+}
+
+
+func BuildStaleRefRepairResult(mismatches []RefMismatch, lines []string) *StaleRefRepairResult {
+	seen := map[int]bool{}
+	changed := []StaleRefRepairLine{}
+	for _, m := range mismatches {
+		if m.OutOfRange || seen[m.Line] || m.Line < 1 || m.Line > len(lines) {
+			continue
+		}
+		seen[m.Line] = true
+		line := lines[m.Line-1]
+		anchor := fmt.Sprintf("%d#%s", m.Line, hashline.HashLine(line, m.Line))
+		changed = append(changed, StaleRefRepairLine{
+			Anchor: anchor,
+			LineNumber: m.Line,
+			Line: line,
+		})
+	}
+	return &StaleRefRepairResult{
+		Status: "stale_refs",
+		ErrorCode: ErrHashMismatch,
+		Message: fmt.Sprintf("%d line(s) changed since last read. Retry with the updated refs below.", len(changed)),
+		Count: len(changed),
+		Changed: changed,
+		Note: "Use the returned anchors directly in your retry instead of rereading the whole file.",
+	}
 }
 
 // BuildSelfCorrectResult constructs the SelfCorrectResult returned when
