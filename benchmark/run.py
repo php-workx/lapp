@@ -908,6 +908,8 @@ def main() -> None:
     elif suite_file != SUITES_FILE:
         # Validate only: suite file is explicitly requested.
         _validate_suite_file(suite_file)
+        print(f"Validated suite file: {suite_file}")
+        return
 
     if suite_version == "v2" and not suite_strategies:
         raise SystemExit(
