@@ -9,7 +9,7 @@ For each instance, the agent is given a pre-fetched source file and asked to:
 
 This measures tool-interface token cost in isolation — not bug-finding ability.
 Config A uses the built-in Read + Edit tools.
-Config B uses lapp_read + lapp_edit.
+Config B uses either native Read + Edit or a lapp strategy, depending on LAPP_STRATEGY.
 
 Bash is excluded from both configs so file edits must go through the
 respective tool set (prevents sed/echo workarounds from polluting the signal).
@@ -48,10 +48,21 @@ AGENT = os.environ.get("AGENT", "claude")
 OPENCODE_MODEL  = os.environ.get("OPENCODE_MODEL", "opencode/gpt-5-nano")
 OPENCODE_CONFIG = Path.home() / ".config/opencode/opencode.json"
 LAPP_GREP_FORMAT = os.environ.get("LAPP_GREP_FORMAT", "text")
+LAPP_STRATEGY = os.environ.get("LAPP_STRATEGY")
+
+V2_STRATEGIES = {
+    "native-edit",
+    "lapp-text-grep",
+    "lapp-structured-grep",
+    "lapp-replace-block",
+}
 
 # Claude tool names (--allowedTools values)
 TOOLS_A = "Read,Edit,Write"
 TOOLS_B = "lapp_read,lapp_edit,lapp_write,lapp_grep"
+TOOLS_B_REPLACE_BLOCK = (
+    "lapp_read,lapp_edit,lapp_write,lapp_grep,lapp_replace_block,lapp_find_block"
+)
 
 # ---- Claude prompts ----
 PROMPT_A = dedent("""\
@@ -68,7 +79,7 @@ PROMPT_A = dedent("""\
 PROMPT_B = dedent("""\
     Apply the following change to the file. Read the file first to locate the
     exact content, make the replacement, save it.
-    {grep_hint}
+    {strategy_hint}
     If a change spans multiple lines, prefer lapp_replace_block with the exact
     old block and new block. Only fall back to find_block + lapp_edit if needed.
     If lapp returns a stale_refs payload, retry using the returned local anchors
@@ -95,7 +106,7 @@ PROMPT_A_OC = dedent("""\
 PROMPT_B_OC = dedent("""\
     Apply the following change to the file. Read the file first to locate the
     exact content, make the replacement, save it.
-    {grep_hint}
+    {strategy_hint}
     If a change spans multiple lines, prefer lapp_lapp_replace_block with the
     exact old block and new block. Only fall back to lapp_lapp_find_block +
     lapp_lapp_edit if needed.
@@ -216,14 +227,23 @@ def parse_patch_change(diff: str) -> list[dict]:
     return changes
 
 
-def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
+def build_prompt(
+    template: str,
+    work_dir: Path,
+    instance_id: str,
+    strategy_hint: str = "",
+) -> str:
     diff_path = FILES_DIR / instance_id / "_patch.diff"
     diff = diff_path.read_text() if diff_path.exists() else ""
     changes = parse_patch_change(diff)
 
     if not changes:
         # Fallback — should not happen for well-formed instances.
-        return template.format(filepath=str(work_dir), changes="(no changes parsed)", grep_hint=grep_hint())
+        return template.format(
+            filepath=str(work_dir),
+            changes="(no changes parsed)",
+            strategy_hint=strategy_hint,
+        )
 
     blocks = []
     for i, ch in enumerate(changes, 1):
@@ -260,19 +280,48 @@ def build_prompt(template: str, work_dir: Path, instance_id: str) -> str:
                 f"  Replace with:\n{_indent(ch['new'])}"
             )
 
-    return template.format(filepath=str(work_dir), changes="\n\n".join(blocks), grep_hint=grep_hint())
+    return template.format(
+        filepath=str(work_dir),
+        changes="\n\n".join(blocks),
+        strategy_hint=strategy_hint,
+    )
 
 
-def grep_hint() -> str:
-    if AGENT == "opencode":
-        tool = "lapp_lapp_grep"
-        edit = "lapp_lapp_edit"
+def strategy_hint(strategy: str, agent: str) -> str:
+    if strategy == "native-edit":
+        if agent == "opencode":
+            return "Use the read and edit tools (no lapp tools)."
+        return "Use the Read and Edit tools (no lapp tools)."
+
+    if agent == "opencode":
+        grep_tool = "lapp_lapp_grep"
+        edit_tool = "lapp_lapp_edit"
+        replace_tool = "lapp_lapp_replace_block"
+        find_tool = "lapp_lapp_find_block"
     else:
-        tool = "lapp_grep"
-        edit = "lapp_edit"
-    if LAPP_GREP_FORMAT == "structured":
-        return f"Preferred: {tool} with literal=true and format=structured to get a machine-readable anchor, then use that anchor directly in {edit}."
-    return f"Preferred: {tool} with literal=true to find the line → {edit}."
+        grep_tool = "lapp_grep"
+        edit_tool = "lapp_edit"
+        replace_tool = "lapp_replace_block"
+        find_tool = "lapp_find_block"
+
+    if strategy == "lapp-text-grep":
+        return (
+            f"Preferred: {grep_tool} with literal=true to find the line → {edit_tool}."
+        )
+
+    if strategy == "lapp-structured-grep":
+        return (
+            f"Preferred: {grep_tool} with literal=true and format=structured to get a"
+            f" machine-readable anchor, then use that anchor directly in {edit_tool}."
+        )
+
+    if strategy == "lapp-replace-block":
+        return (
+            f"Prefer {replace_tool} with the exact old block and new block; "
+            f"if needed, fall back to {find_tool} + {edit_tool}."
+        )
+
+    return ""
 
 
 def _indent(text: str) -> str:  # prefix every line with 4 spaces for readability
@@ -298,18 +347,127 @@ def patch_similarity(applied: str, reference: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def load_v1_suite(name: str) -> list[str]:
-    data = json.loads(SUITES_FILE.read_text())
-    suites = data.get("suites", {})
+V2_METADATA_FIELDS = ["file_size_bucket", "change_count_bucket"]
+
+
+def _load_suite_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError as exc:
+        raise SystemExit(f"ERROR: suite file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"ERROR: suite file {path} is not valid JSON: {exc}") from exc
+
+
+def _validate_suite_file(path: Path) -> dict:
+    data = _load_suite_file(path)
+    suites = data.get("suites")
+    if not isinstance(suites, dict):
+        raise SystemExit(f"ERROR: suite file {path} missing 'suites' object")
+    return data
+
+
+def _extract_suite_metadata(raw: dict[str, object]) -> dict[str, str]:
+    metadata = raw.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+
+    return {
+        field: value
+        for field in V2_METADATA_FIELDS
+        if (value := metadata.get(field)) is not None
+    }
+
+
+def _extract_suite_strategies(raw: dict[str, object], suite_name: str) -> list[str]:
+    value = raw.get("strategies")
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise SystemExit(
+            f"ERROR: suite {suite_name!r} must define 'strategies' as a list"
+        )
+
+    strategies: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise SystemExit(
+                f"ERROR: suite {suite_name!r} strategy entries must be strings in {value!r}"
+            )
+        strategies.append(item)
+
+    return strategies
+
+
+def _validate_suite_strategies(strategies: list[str], suite_name: str) -> None:
+    unknown = [s for s in strategies if s not in V2_STRATEGIES]
+    if unknown:
+        raise SystemExit(
+            "ERROR: suite "
+            f"{suite_name!r} includes unsupported strategies: {', '.join(unknown)}; "
+            f"supported: {', '.join(sorted(V2_STRATEGIES))}"
+        )
+
+
+def load_suite(name: str, suite_file: Path) -> tuple[
+    list[str],
+    dict[str, dict[str, str]],
+    dict[str, str],
+    list[str],
+]:
+    data = _validate_suite_file(suite_file)
+    suites = data.get("suites")
+
     if name not in suites:
-        raise SystemExit(f"unknown suite {name!r}; available: {', '.join(sorted(suites))}")
-    return suites[name]["instances"]
+        raise SystemExit(
+            f"unknown suite {name!r}; available: {', '.join(sorted(suites))}"
+        )
+
+    suite = suites[name]
+    if not isinstance(suite, dict):
+        raise SystemExit(f"ERROR: suite {name!r} entry must be an object in {suite_file}")
+
+    instances = suite.get("instances")
+    if not isinstance(instances, list):
+        raise SystemExit(
+            f"ERROR: suite {name!r} must define 'instances' as a list in {suite_file}"
+        )
+
+    suite_defaults: dict[str, str] = _extract_suite_metadata(suite)
+    suite_strategies = _extract_suite_strategies(suite, name)
+    _validate_suite_strategies(suite_strategies, name)
+
+    suite_ids: list[str] = []
+    per_instance_metadata: dict[str, dict[str, str]] = {}
+
+    for entry in instances:
+        if isinstance(entry, str):
+            suite_ids.append(entry)
+            continue
+
+        if isinstance(entry, dict):
+            instance_id = entry.get("instance_id") or entry.get("id")
+            if not isinstance(instance_id, str) or not instance_id:
+                raise SystemExit(
+                    f"ERROR: invalid instance entry in suite {name!r}: {entry}"
+                )
+            suite_ids.append(instance_id)
+            per_instance = _extract_suite_metadata(entry)
+            if per_instance:
+                per_instance_metadata[instance_id] = per_instance
+            continue
+
+        raise SystemExit(
+            f"ERROR: invalid instance entry in suite {name!r}: {entry}"
+        )
+
+    return suite_ids, per_instance_metadata, suite_defaults, suite_strategies
 
 
-def benchmark_version() -> str:
-    if SUITES_FILE.exists():
-        return json.loads(SUITES_FILE.read_text()).get("version", "ad-hoc")
-    return "ad-hoc"
+def benchmark_version(suite_file: Path) -> str:
+    if not suite_file.exists():
+        return "ad-hoc"
+    return _load_suite_file(suite_file).get("version", "ad-hoc")
 
 
 # ---------------------------------------------------------------------------
@@ -525,8 +683,12 @@ def _err(msg: str) -> dict:
 # Per-instance orchestration
 # ---------------------------------------------------------------------------
 
-def run_instance(instance: dict, lapp_binary: str) -> dict:
+def run_instance(instance: dict, lapp_binary: str, strategy: str | None = None) -> dict:
     iid = instance["instance_id"]
+    run_strategy = strategy or (
+        "lapp-structured-grep" if AGENT == "opencode" and LAPP_GREP_FORMAT == "structured"
+        else "lapp-text-grep"
+    )
 
     with tempfile.TemporaryDirectory(prefix="lapp-bench-") as tmp:
         tmp_path = Path(tmp)
@@ -540,7 +702,7 @@ def run_instance(instance: dict, lapp_binary: str) -> dict:
 
         if AGENT == "opencode":
             # OpenCode: config injection via OPENCODE_CONFIG_CONTENT; no --allowedTools.
-            # Config A = base config (no lapp).  Config B = base + lapp merged in.
+            # Config A = base config (no lapp).  Config B = base + lapp MCP.
             print(f"    [A] read → edit  (opencode/{OPENCODE_MODEL})", flush=True)
             prompt_a = build_prompt(PROMPT_A_OC, work_dir, iid)
             result_a = run_opencode(prompt_a, None, work_dir)
@@ -548,10 +710,25 @@ def run_instance(instance: dict, lapp_binary: str) -> dict:
 
             reset_work_dir(iid, work_dir)
 
-            print(f"    [B] lapp_lapp_grep → lapp_lapp_edit  (opencode/{OPENCODE_MODEL})", flush=True)
-            prompt_b = build_prompt(PROMPT_B_OC, work_dir, iid)
-            result_b = run_opencode(prompt_b, lapp_binary, work_dir)
-            diff_b   = capture_diff(work_dir, iid)
+            if run_strategy == "native-edit":
+                print(f"    [B] read → edit  (opencode/{OPENCODE_MODEL})", flush=True)
+                prompt_b = build_prompt(PROMPT_A_OC, work_dir, iid)
+                result_b = run_opencode(prompt_b, None, work_dir)
+            else:
+                b_tool_desc = "lapp_lapp_replace_block" if run_strategy == "lapp-replace-block" else "lapp_lapp_grep"
+                print(
+                    f"    [B] {b_tool_desc} → lapp_lapp_edit  (opencode/{OPENCODE_MODEL})",
+                    flush=True,
+                )
+                prompt_b = build_prompt(
+                    PROMPT_B_OC,
+                    work_dir,
+                    iid,
+                    strategy_hint=strategy_hint(run_strategy, AGENT),
+                )
+                result_b = run_opencode(prompt_b, lapp_binary, work_dir)
+
+            diff_b = capture_diff(work_dir, iid)
 
         else:
             # Claude Code: --allowedTools + --strict-mcp-config for clean isolation.
@@ -568,10 +745,23 @@ def run_instance(instance: dict, lapp_binary: str) -> dict:
             reset_work_dir(iid, work_dir)
             write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
 
-            print(f"    [B] lapp_read → lapp_edit  (claude)", flush=True)
-            prompt_b = build_prompt(PROMPT_B, work_dir, iid)
-            result_b = run_claude(prompt_b, TOOLS_B, lapp_mcp, work_dir)
-            diff_b   = capture_diff(work_dir, iid)
+            if run_strategy == "native-edit":
+                print(f"    [B] Read → Edit  (claude)", flush=True)
+                prompt_b = build_prompt(PROMPT_A, work_dir, iid)
+                result_b = run_claude(prompt_b, TOOLS_A, empty_mcp, work_dir)
+            else:
+                tools_b = TOOLS_B_REPLACE_BLOCK if run_strategy == "lapp-replace-block" else TOOLS_B
+                b_label = "lapp_replace_block → lapp_edit" if run_strategy == "lapp-replace-block" else "lapp_read → lapp_edit"
+                print(f"    [B] {b_label}  (claude)", flush=True)
+                prompt_b = build_prompt(
+                    PROMPT_B,
+                    work_dir,
+                    iid,
+                    strategy_hint=strategy_hint(run_strategy, AGENT),
+                )
+                result_b = run_claude(prompt_b, tools_b, lapp_mcp, work_dir)
+
+            diff_b = capture_diff(work_dir, iid)
 
     return {
         "instance_id":     iid,
@@ -606,19 +796,86 @@ def slug_model_name(name: str) -> str:
         slug = slug.replace('__', '_')
     return slug or 'unknown-model'
 
+def resolve_v2_strategy(suite_strategies: list[str]) -> str | None:
+    strategy = LAPP_STRATEGY
+    if strategy is not None and strategy not in V2_STRATEGIES:
+        raise SystemExit(
+            f"ERROR: invalid LAPP_STRATEGY {strategy!r}; "
+            f"expected one of: {', '.join(sorted(V2_STRATEGIES))}"
+        )
 
-def canonical_results_dir(suite_name: str | None) -> Path:
+    if strategy is not None:
+        if suite_strategies and strategy not in suite_strategies:
+            raise SystemExit(
+                f"ERROR: LAPP_STRATEGY {strategy!r} is not configured for this suite; "
+                f"available: {', '.join(suite_strategies)}"
+            )
+        return strategy
+
+    # Preserve V1-style grep defaults when no V2 override is set.
+    if "lapp-structured-grep" in suite_strategies and AGENT == "opencode" and LAPP_GREP_FORMAT == "structured":
+        return "lapp-structured-grep"
+    if "lapp-text-grep" in suite_strategies:
+        return "lapp-text-grep"
+    if suite_strategies:
+        return suite_strategies[0]
+    return None
+
+
+def canonical_results_dir(suite_name: str | None, variant: str | None = None) -> Path:
     override = os.environ.get("RESULTS_SUBDIR")
     if override:
         return RESULTS_BASE / override
     suite_part = suite_name or 'ad-hoc'
     model_part = f"{AGENT}__{slug_model_name(current_model_name())}"
-    if current_grep_variant() != "text":
+    if variant:
+        model_part += f"__{slug_model_name(variant)}"
+    elif current_grep_variant() != "text":
         model_part += f"__grep-{slug_model_name(current_grep_variant())}"
     return RESULTS_BASE / suite_part / model_part
 
 
+def _parse_args() -> tuple[str | None, Path]:
+    suite_name: str | None = None
+    suite_file = SUITES_FILE
+    args = sys.argv[1:]
+    idx = 0
+
+    while idx < len(args):
+        arg = args[idx]
+        if arg == "--suite":
+            if idx + 1 >= len(args):
+                print("ERROR: --suite requires a suite name", file=sys.stderr)
+                sys.exit(1)
+            suite_name = args[idx + 1]
+            idx += 2
+        elif arg == "--suite-file":
+            if idx + 1 >= len(args):
+                print("ERROR: --suite-file requires a file path", file=sys.stderr)
+                sys.exit(1)
+            suite_file = Path(args[idx + 1]).expanduser()
+            idx += 2
+        else:
+            print(f"ERROR: unknown argument: {arg}", file=sys.stderr)
+            print("Supported arguments: --suite, --suite-file", file=sys.stderr)
+            sys.exit(1)
+
+    return suite_name, suite_file
+
+
+def _get_suite_instance_metadata(
+    suite_default: dict[str, str],
+    per_instance: dict[str, dict[str, str]],
+    instance_id: str,
+) -> dict[str, str]:
+    merged = dict(suite_default)
+    merged.update(per_instance.get(instance_id, {}))
+    return merged
+
+
 def main() -> None:
+    suite_name, suite_file = _parse_args()
+
     if not INSTANCES_FILE.exists():
         print(f"ERROR: instances.json not found — run fetch_instances.py first.",
               file=sys.stderr)
@@ -630,12 +887,41 @@ def main() -> None:
               file=sys.stderr)
         sys.exit(1)
 
-    suite_name = None
-    if "--suite" in sys.argv:
-        idx = sys.argv.index("--suite")
-        suite_name = sys.argv[idx + 1]
-        suite_ids = set(load_v1_suite(suite_name))
-        instances = [i for i in instances if i["instance_id"] in suite_ids]
+    suite_defaults: dict[str, str] = {}
+    per_instance_metadata: dict[str, dict[str, str]] = {}
+    suite_strategies: list[str] = []
+    suite_version = benchmark_version(suite_file)
+
+    if suite_name:
+        suite_ids, per_instance_metadata, suite_defaults, suite_strategies = load_suite(
+            suite_name, suite_file
+        )
+        suite_id_set = set(suite_ids)
+        instances = [
+            {
+                **i,
+                **_get_suite_instance_metadata(suite_defaults, per_instance_metadata, i["instance_id"]),
+            }
+            for i in instances
+            if i["instance_id"] in suite_id_set
+        ]
+    elif suite_file != SUITES_FILE:
+        # Validate only: suite file is explicitly requested.
+        _validate_suite_file(suite_file)
+
+    if suite_version == "v2" and not suite_strategies:
+        raise SystemExit(
+            "ERROR: v2 suite metadata missing 'strategies'; add a suite-level strategy list"
+        )
+
+    v2_strategy = None
+    if suite_version == "v2":
+        v2_strategy = resolve_v2_strategy(suite_strategies)
+        if v2_strategy is None:
+            raise SystemExit(
+                "ERROR: unable to determine V2 strategy; set LAPP_STRATEGY to one of: "
+                f"{', '.join(sorted(V2_STRATEGIES))}"
+            )
 
     lapp_binary = shutil.which("lapp")
     if not lapp_binary:
@@ -653,7 +939,9 @@ def main() -> None:
         print(f"Running {len(instances)} instance(s)")
 
     skip_existing = os.environ.get("SKIP_EXISTING", "1") != "0"
-    results_dir = canonical_results_dir(suite_name)
+    results_dir = canonical_results_dir(
+        suite_name, v2_strategy if suite_version == "v2" else None
+    )
     results_dir.mkdir(parents=True, exist_ok=True)
 
     for idx, instance in enumerate(instances, 1):
@@ -665,12 +953,26 @@ def main() -> None:
             continue
 
         print(f"  [{idx}/{len(instances)}] {iid}")
-        result = run_instance(instance, lapp_binary)
-        result.setdefault("benchmark_version", benchmark_version())
+        result = run_instance(
+            instance,
+            lapp_binary,
+            strategy=v2_strategy if suite_version == "v2" else None,
+        )
+        result.setdefault("benchmark_version", suite_version)
         result.setdefault("suite", suite_name or "ad-hoc")
         result.setdefault("agent", AGENT)
         result.setdefault("model", current_model_name())
         result.setdefault("grep_format", current_grep_variant())
+        for field in V2_METADATA_FIELDS:
+            if field in instance:
+                result.setdefault(field, instance[field])
+        if suite_version == "v2":
+            if any(not instance.get(field) for field in V2_METADATA_FIELDS):
+                raise SystemExit(
+                    f"ERROR: missing V2 metadata for {iid}; expected fields "
+                    f"{', '.join(V2_METADATA_FIELDS)}"
+                )
+            result["strategy"] = v2_strategy
         out_path.write_text(json.dumps(result, indent=2))
 
         if "error" in result and "a" not in result:
