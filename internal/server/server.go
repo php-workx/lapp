@@ -612,6 +612,42 @@ func stripSharedIndent(lines []string) []string {
 	return out
 }
 
+
+func sharedIndentString(lines []string) string {
+	minIndent := -1
+	indentStr := ""
+	for _, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if trimmed == "" {
+			continue
+		}
+		indent := len(line) - len(trimmed)
+		if minIndent == -1 || indent < minIndent {
+			minIndent = indent
+			indentStr = line[:indent]
+		}
+	}
+	return indentStr
+}
+
+func rebaseBlockIndent(oldBlock, newBlock []string) []string {
+	if len(newBlock) == 0 {
+		return newBlock
+	}
+	oldIndent := sharedIndentString(oldBlock)
+	newBase := stripSharedIndent(newBlock)
+	// stripSharedIndent returns the normalized lines; rebuild using the old base indent.
+	out := make([]string, len(newBase))
+	for i, line := range newBase {
+		if line == "" {
+			out[i] = ""
+			continue
+		}
+		out[i] = oldIndent + line
+		}
+	return out
+}
+
 func findBlockRanges(lines, needle []string, normalizeWhitespace bool) []blockRange {
 	needleNorm := needle
 	if normalizeWhitespace {
@@ -749,7 +785,13 @@ func (s *Server) handleReplaceBlock(ctx context.Context, req mcp.CallToolRequest
 	r := ranges[0]
 	startRef := fmt.Sprintf("%d#%s", r.start, hashline.HashLine(fd.Lines[r.start-1], r.start))
 	endRef := fmt.Sprintf("%d#%s", r.end, hashline.HashLine(fd.Lines[r.end-1], r.end))
-	edits := []editor.Edit{{Type: editor.EditReplace, Start: startRef, End: endRef, Content: &newContent}}
+	adjustedNewContent := newContent
+	if normalizeWhitespace {
+		oldBlock := fd.Lines[r.start-1 : r.end]
+		newBlock := splitSearchContent(newContent)
+		adjustedNewContent = strings.Join(rebaseBlockIndent(oldBlock, newBlock), "\n")
+	}
+	edits := []editor.Edit{{Type: editor.EditReplace, Start: startRef, End: endRef, Content: &adjustedNewContent}}
 	editReq := &editor.EditRequest{Path: path, Edits: edits}
 	newLines, result, errCode, errDetail := editor.ApplyEdits(fd, editReq)
 	if errCode != "" {

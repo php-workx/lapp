@@ -415,15 +415,15 @@ func TestReplaceBlockNormalizeWhitespace(t *testing.T) {
 	writeTestFile(t, filePath, "class A:\n    def f(self):\n        x = 1\n        return x\n")
 
 	old := "            x = 1\n            return x"
-	new := "            x = right\n            return x"
+	new := "            if cond:\n                x = right"
 	out := callReplaceBlock(t, s, filePath, old, new)
 	if !strings.Contains(out, "OK:") {
 		t.Fatalf("replace block with normalized whitespace failed: %s", out)
 	}
 	data, _ := os.ReadFile(filePath)
 	got := string(data)
-	if !strings.Contains(got, "        x = right") {
-		t.Fatalf("expected normalized replace to preserve file indentation, got: %s", got)
+	if !strings.Contains(got, "        if cond:\n            x = right") {
+		t.Fatalf("expected normalized replace to preserve base + relative indentation, got: %s", got)
 	}
 }
 
