@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,7 +20,8 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-const version = "0.1.0"
+// Version is overridden via -ldflags at build time (see justfile).
+var Version = "dev"
 
 // Server wraps an MCPServer with project configuration.
 type Server struct {
@@ -55,7 +57,7 @@ func New(cfg *fileio.Config) *Server {
 	fmt.Fprintln(os.Stderr, "lapp: add to CLAUDE.md → Prefer lapp_read/lapp_edit/lapp_write/lapp_grep over built-in Read/Edit/Write/Grep; for multiline helpers prefer lapp_insert_block, lapp_replace_block, and lapp_apply_patch when one file has multiple hunks")
 
 	s := &Server{cfg: cfg, guard: map[string]*fileGuardState{}}
-	s.mcpS = mcpserver.NewMCPServer("lapp", version, mcpserver.WithToolCapabilities(false))
+	s.mcpS = mcpserver.NewMCPServer("lapp", Version, mcpserver.WithToolCapabilities(false))
 	s.registerTools()
 	return s
 }
@@ -163,7 +165,11 @@ func marshalGuardedStalePayload(payload editor.StaleRefRepairResult, apply func(
 	if apply != nil {
 		apply(&payload)
 	}
-	jsonBytes, _ := json.Marshal(payload)
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("marshalGuardedStalePayload: %v", err)
+		return fmt.Sprintf(`{"status":"error","message":"marshal failed: %s"}`, err)
+	}
 	return string(jsonBytes)
 }
 
@@ -178,7 +184,11 @@ func marshalSuccessResponse(message, path string, result *editor.EditResult, war
 			resp.Warnings = append(resp.Warnings, *w)
 		}
 	}
-	jsonBytes, _ := json.Marshal(resp)
+	jsonBytes, err := json.Marshal(resp)
+	if err != nil {
+		log.Printf("marshalSuccessResponse: %v", err)
+		return fmt.Sprintf(`{"status":"ok","message":"marshal failed: %s"}`, err)
+	}
 	return string(jsonBytes)
 }
 
