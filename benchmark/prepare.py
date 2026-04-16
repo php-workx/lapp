@@ -88,7 +88,8 @@ def fetch_instance_files(instance: dict) -> None:
     patch = instance["patch"]
 
     dest_dir = FILES_DIR / iid
-    if dest_dir.exists() and any(dest_dir.iterdir()):
+    sentinel = dest_dir / "._complete"
+    if sentinel.exists():
         print(f"  {iid}  (already fetched)")
         return
 
@@ -128,6 +129,11 @@ def fetch_instance_files(instance: dict) -> None:
 
     if fetch_errors:
         raise RuntimeError(f"{fetch_errors} file(s) failed to fetch for {iid}")
+
+    # Write sentinel atomically so re-runs skip complete fetches.
+    tmp = sentinel.with_suffix(".tmp")
+    tmp.write_text("ok")
+    tmp.rename(sentinel)
 
 
 # ---------------------------------------------------------------------------
