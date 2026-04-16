@@ -128,7 +128,7 @@ def setup_work_dir(instance_id: str, work_dir: Path) -> None:
             f"No files for {instance_id} — run prepare.py first"
         )
     for item in src.iterdir():
-        if item.name == "_patch.diff":
+        if item.name == "_patch.diff" or item.name == "_task.txt" or item.name == "._complete":
             continue
         dst = work_dir / item.name
         if item.is_dir():
@@ -156,7 +156,7 @@ def capture_diff(work_dir: Path, instance_id: str) -> str:
             continue
         rels.add(orig.relative_to(src))
     for cur in work_dir.rglob("*"):
-        if cur.is_dir():
+        if cur.is_dir() or cur.name == "._complete" or cur.name == "_task.txt":
             continue
         rels.add(cur.relative_to(work_dir))
 
@@ -872,7 +872,7 @@ def resolve_v2_strategy(suite_strategies: list[str]) -> str | None:
     return None
 
 
-def canonical_results_dir(suite_name: str | None, variant: str | None = None) -> Path:
+def canonical_results_dir(suite_name: str | None, variant: str | None = None, strategy: str | None = None) -> Path:
     override = os.environ.get("RESULTS_SUBDIR")
     if override:
         return RESULTS_BASE / override
@@ -882,6 +882,8 @@ def canonical_results_dir(suite_name: str | None, variant: str | None = None) ->
         model_part += f"__{slug_model_name(variant)}"
     elif current_grep_variant() != "text":
         model_part += f"__grep-{slug_model_name(current_grep_variant())}"
+    if strategy and strategy != "native-edit":
+        model_part += f"__{slug_model_name(strategy)}"
     return RESULTS_BASE / suite_part / model_part
 
 
@@ -1000,7 +1002,7 @@ def main() -> None:
 
     skip_existing = os.environ.get("SKIP_EXISTING", "1") != "0"
     results_dir = canonical_results_dir(
-        suite_name, strategy if suite_version == "v2" else None
+        suite_name, variant=None, strategy=strategy
     )
     results_dir.mkdir(parents=True, exist_ok=True)
 

@@ -9,7 +9,7 @@ Metrics reported per instance:
   sim       — patch similarity to reference fix (0–100%; higher = more correct)
   cost      — USD cost of the run
 
-Aggregate row shows totals for tokens/cost and weighted-average similarity.
+Aggregate row shows totals for tokens/cost and mean similarity.
 
 Usage:
   python benchmark/report.py                  # default results dir
