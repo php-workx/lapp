@@ -201,8 +201,10 @@ def main() -> None:
         flag = ""
         if err_a:
             flag += f"  [A-ERR: {err_a[:30]}]"
+            error_count += 1
         if err_b:
             flag += f"  [B-ERR: {err_b[:30]}]"
+            error_count += 1
 
         print(
             f"{iid:<{ID_W}}  "
