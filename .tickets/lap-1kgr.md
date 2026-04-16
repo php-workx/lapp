@@ -11,13 +11,15 @@ tags: [robustness, server]
 ---
 # Cap lapp_grep result size to prevent oversized MCP responses
 
-handleGrep walks the entire directory tree and accumulates all matches into an unbounded strings.Builder (server.go:322-389). On a large codebase with a broad pattern (e.g. '.' or 'import'), this can produce megabytes of output in a single MCP response, which:
+Originally, handleGrep walked the entire directory tree and accumulated all matches into an unbounded strings.Builder (server.go:322-389). On a large codebase with a broad pattern (e.g. '.' or 'import'), this could produce megabytes of output in a single MCP response, which:
 
-1. Overflows the model's context window, wasting tokens on truncated content.
-2. May hit MCP transport size limits or cause timeouts.
-3. Is inconsistent with lapp_read, which caps output at --limit lines.
+1. Could overflow the model's context window, wasting tokens on truncated content.
+2. Could hit MCP transport size limits or cause timeouts.
+3. Was inconsistent with lapp_read, which caps output at --limit lines.
 
 The spec's security section (§10) specifically calls out capping response sizes.
+
+Fixed in this PR: handleGrep now caps at 100 file matches, maxOutputLines for text mode, and maxStructuredMatches (500) for structured mode, with truncation signaling.
 
 ## Design
 

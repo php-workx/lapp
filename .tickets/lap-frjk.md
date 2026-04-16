@@ -11,14 +11,16 @@ tags: [robustness, server]
 ---
 # Set sensible default permissions on files created by lapp_write
 
-handleWrite creates the temp file with permissions 0600 (server.go:259) and renames it without calling os.Chmod. The resulting file is owner-readable/writable only, overly restrictive for source code files (conventionally 0644).
+Previously, handleWrite created the temp file with permissions 0600 (server.go:259) and renamed it without calling os.Chmod. The resulting file was owner-readable/writable only, overly restrictive for source code files (conventionally 0644).
 
 Consequences:
 - Other processes (linters, build tools, IDE indexers) checking group/other bits may fail to read.
 - File appears with unusual permissions in ls -la, surprising the user.
 - On shared-user systems, collaborators cannot read the file.
 
-Root cause: Unlike fileio.WriteFile (which reads info.Mode() from the existing file), handleWrite has no existing file to reference and never sets a default.
+Root cause: Unlike fileio.WriteFile (which reads info.Mode() from the existing file), handleWrite had no existing file to reference and never set a default.
+
+Fixed in this PR: server.go now calls os.Chmod(tmpPath, 0644) before rename.
 
 ## Design
 
