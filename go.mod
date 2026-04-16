@@ -2,6 +2,8 @@ module github.com/lapp-dev/lapp
 
 go 1.25.0
 
+toolchain go1.25.9
+
 require (
 	github.com/OneOfOne/xxhash v1.2.8
 	github.com/bmatcuk/doublestar/v4 v4.10.0
