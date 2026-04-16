@@ -676,6 +676,9 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		filesMatched++
 		if format == fmtStructured {
 			for _, m := range matches {
+				if len(structuredMatches) >= maxStructuredMatches {
+					break
+				}
 				before := []string{}
 				after := []string{}
 				for k := max(1, m-ctxLines); k < m; k++ {
