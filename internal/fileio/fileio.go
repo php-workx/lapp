@@ -18,14 +18,14 @@ import (
 
 // Error codes returned by all fileio operations.
 const (
-	ErrFileNotFound    = "ERR_FILE_NOT_FOUND"
-	ErrPathOutsideRoot = "ERR_PATH_OUTSIDE_ROOT"
-	ErrPathBlocked     = "ERR_PATH_BLOCKED"
-	ErrBinaryFile      = "ERR_BINARY_FILE"
-	ErrInvalidEncoding = "ERR_INVALID_ENCODING"
-	ErrLocked            = "ERR_LOCKED"
+	ErrFileNotFound     = "ERR_FILE_NOT_FOUND"
+	ErrPathOutsideRoot  = "ERR_PATH_OUTSIDE_ROOT"
+	ErrPathBlocked      = "ERR_PATH_BLOCKED"
+	ErrBinaryFile       = "ERR_BINARY_FILE"
+	ErrInvalidEncoding  = "ERR_INVALID_ENCODING"
+	ErrLocked           = "ERR_LOCKED"
 	ErrPermissionDenied = "ERR_PERMISSION_DENIED"
-	ErrWriteFailed       = "ERR_WRITE_FAILED"
+	ErrWriteFailed      = "ERR_WRITE_FAILED"
 )
 
 // Config holds server-wide settings passed from CLI flags.
@@ -35,13 +35,13 @@ type Config struct {
 	AllowPatterns []string // override patterns (remove from block list)
 	DefaultLimit  int      // default lapp_read line limit
 	EnabledTools  []string // optional allow-list of exposed tool names; empty means all
-	}
+}
 
 // FileData holds a parsed file's content and metadata.
 type FileData struct {
-	Lines          []string    // raw line content (no terminators)
-	Terminators    []string    // per-line: "\r\n", "\n", or "" (last line)
-	MajorityEnding string      // "\r\n" or "\n"
+	Lines          []string // raw line content (no terminators)
+	Terminators    []string // per-line: "\r\n", "\n", or "" (last line)
+	MajorityEnding string   // "\r\n" or "\n"
 	HasBOM         bool
 	Mode           fs.FileMode
 	CanonicalPath  string
@@ -149,7 +149,7 @@ func WriteFile(fd *FileData, newLines []string) string {
 	tempPath := fmt.Sprintf("%s.%d.%s.lapp.tmp",
 		fd.CanonicalPath, os.Getpid(), RandomHex(8))
 
-	f, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if os.IsPermission(err) {
 			return ErrPermissionDenied
@@ -216,7 +216,7 @@ func WriteFile(fd *FileData, newLines []string) string {
 // CheckPath validates that path is inside cfg.Root and not blocked by the
 // block list. If mustExist is true, EvalSymlinks fully resolves the path;
 // otherwise only the parent directory is resolved (for new-file creation).
-func CheckPath(path string, cfg *Config, mustExist bool) (canonical string, errCode string) {
+func CheckPath(path string, cfg *Config, mustExist bool) (canonical, errCode string) {
 	cleaned := filepath.Clean(path)
 
 	if mustExist {
@@ -264,7 +264,7 @@ func AcquireLock(canonicalPath string) (unlock func(), errCode string) {
 	}
 
 	lockDir := filepath.Join(cacheDir, "lapp", "locks")
-	if err := os.MkdirAll(lockDir, 0700); err != nil {
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
 		return nil, ErrLocked
 	}
 
@@ -273,7 +273,7 @@ func AcquireLock(canonicalPath string) (unlock func(), errCode string) {
 	h.Write([]byte(canonicalPath))
 	lockPath := filepath.Join(lockDir, fmt.Sprintf("%x.lock", h.Sum64()))
 
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0600)
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, ErrLocked
 	}
@@ -284,8 +284,8 @@ func AcquireLock(canonicalPath string) (unlock func(), errCode string) {
 	}
 
 	unlock = func() {
-		platformUnlock(int(f.Fd())) //nolint:errcheck
-		f.Close()
+		_ = platformUnlock(int(f.Fd()))
+		_ = f.Close()
 		os.Remove(lockPath) // best-effort
 	}
 	return unlock, ""
@@ -311,18 +311,17 @@ func CleanupOrphans(root string) {
 			return nil
 		}
 		if time.Since(info.ModTime()) > cutoff {
-			os.Remove(path) //nolint:errcheck
+			os.Remove(path)
 		}
 		return nil
 	})
 }
 
-
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 // splitLines walks raw file bytes and returns lines and per-line terminators.
 // A file ending with '\n' does NOT produce a trailing empty line.
-func splitLines(data []byte) (lines []string, terminators []string) {
+func splitLines(data []byte) (lines, terminators []string) {
 	start := 0
 	for i := 0; i < len(data); i++ {
 		if data[i] != '\n' {
@@ -343,7 +342,7 @@ func splitLines(data []byte) (lines []string, terminators []string) {
 		lines = append(lines, string(data[start:]))
 		terminators = append(terminators, "")
 	}
-	return
+	return lines, terminators
 }
 
 // isBlocked returns true if relPath matches a block pattern and is not
@@ -362,7 +361,7 @@ func isBlocked(relPath string, blockPatterns, allowPatterns []string) bool {
 	return false
 }
 
-// randomHex returns n random lowercase hex characters.
+// RandomHex returns n random lowercase hex characters.
 func RandomHex(n int) string {
 	b := make([]byte, (n+1)/2)
 	if _, err := rand.Read(b); err != nil {
