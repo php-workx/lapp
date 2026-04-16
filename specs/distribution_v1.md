@@ -230,7 +230,7 @@ const agents = {
     displayName: "Claude Code",
     skillsDir: ".claude/skills",
     globalSkillsDir: "~/.claude/skills",
-    detectInstalled: () => existsSync("~/.claude"),
+    detectInstalled: () => existsSync(path.join(os.homedir(), ".claude")),
   },
   codex: {
     name: "codex",
@@ -308,9 +308,7 @@ For lapp, the MCP server entry points to the installed binary with `--root` set 
 }
 ```
 
-**Key decision:** `--root` should default to the **current working directory** at setup time. For global installs, we set `--root` to the cwd. Users can manually edit it later.
-
-**Alternative:** Omit `--root` entirely. When lapp starts without `--root`, it defaults to `os.Getwd()` (the MCP client's cwd). This is simpler and works for any project. **Prefer this approach** — it matches the current binary behavior and avoids hardcoding a path.
+**Key decision:** Omit `--root` entirely. When lapp starts without `--root`, it defaults to `os.Getwd()` (the MCP client's cwd). This is simpler and works for any project, matches the current binary behavior, and avoids hardcoding a path that becomes stale when the user switches projects.
 
 So the minimal entry is:
 
@@ -374,7 +372,7 @@ Also attempt `amp mcp add lapp -- /path/to/lapp` via CLI.
 
 ### 7.6 OpenCode Specifics
 
-OpenCode doesn't need MCP config via file — it detects servers differently. Write the binary to PATH and register the skill.
+OpenCode doesn't need MCP config via file — it auto-discovers stdio MCP servers on PATH. The V1 installer places the lapp binary on PATH and registers the skill. No `mcpServers` config entry is written for OpenCode.
 
 ---
 
@@ -714,7 +712,7 @@ export async function addToShellProfile(binDir: string): Promise<void>
 
 1. Construct URL: `https://github.com/lapp-dev/lapp/releases/download/v${version}/lapp_${version}_${os}_${arch}.tar.gz`
 2. Fetch via `node:https` (or `fetch` in Node 18+)
-3. Pipe through `zlib.createGunzip()` → `tar.extract()` (use `node:tar` or a lightweight tar parser)
+3. Pipe through `zlib.createGunzip()` → `tar.extract()` (use the `tar` npm package, not `node:tar` which does not exist)
 4. Write to `~/.lapp/bin/lapp`
 5. `chmod 0o755` on non-Windows
 6. Verify: `execFile(installPath, ['--version'])` matches `version`
@@ -861,7 +859,7 @@ Minimal, opt-out. Same pattern as morph-setup:
 | Risk | Mitigation |
 |------|------------|
 | Path traversal in skill names | `sanitizeName()` strips `/`, `\`, `:`, null bytes; `isPathSafe()` checks resolved paths |
-| Binary tampering | Verify `--version` output matches expected version after download |
+| Binary tampering | Verify SHA-256 checksum against published hash after download, then verify `--version` matches as a sanity check |
 | Config corruption | Read → merge → write (never overwrite). Use JSON5 for lenient parsing |
 | Symlink escape | Validate symlink targets stay within expected directories |
 | Temp dir cleanup | Only delete paths inside `os.tmpdir()` (same guard as morph-setup) |
