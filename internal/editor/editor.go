@@ -640,10 +640,10 @@ func applyOne(pe parsedEdit, lines []string) []string {
 		var newContent []string
 		if e.Content != nil && *e.Content != "" {
 			newContent = splitContent(*e.Content)
-			if pe.startLine == pe.endLine && pe.startLine >= 1 && pe.startLine <= len(lines) {
-				// Single-line anchored replacements should preserve the original line's
-				// indentation unless the caller uses a broader range edit. Models often
-				// change leading whitespace accidentally when rewriting one code line.
+			if pe.startLine == pe.endLine && pe.startLine >= 1 && pe.startLine <= len(lines) && e.Anchor != "" {
+				// Single-line anchor-based replacements preserve the original line's
+				// indentation. Range-based replaces (replace_block, apply_patch)
+				// intentionally set indentation, so don't override it.
 				newContent = preserveSingleLineIndent(lines[pe.startLine-1], newContent)
 			}
 		}
