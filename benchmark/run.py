@@ -513,18 +513,16 @@ def benchmark_version(suite_file: Path) -> str:
 
 def _oc_config(lapp_binary: str | None, work_dir: Path | None) -> str:
     """
-    Return opencode config JSON, merging lapp MCP into the user's existing config.
-    If lapp_binary is None, returns the base config unchanged (Config A).
+    Return opencode config JSON for benchmark reproducibility.
 
-    When lapp is enabled (Config B), also register the lapp-tools.md instructions
-    file in the always-on instructions array — matching what lapp-setup does for
-    OpenCode in production. Without this, the model lacks the tool-routing policy
-    that real users get via the instructions[] mechanism.
+    Constructs a minimal, deterministic config so that Config A/B are
+    reproducible across machines. When lapp_binary is None (Config A),
+    returns a bare config with no MCP servers. When lapp_binary is set
+    (Config B), adds the lapp MCP server and instructions file.
     """
-    base = json.loads(OPENCODE_CONFIG.read_text()) if OPENCODE_CONFIG.exists() else {}
+    cfg: dict = {}
     if lapp_binary is None:
-        return json.dumps(base)
-    cfg = copy.deepcopy(base)
+        return json.dumps(cfg)
     command = [lapp_binary, "--root", str(work_dir)]
     only_tools = os.environ.get("LAPP_ONLY_TOOLS", "").strip()
     if only_tools:
@@ -970,17 +968,24 @@ def main() -> None:
             "ERROR: v2 suite metadata missing 'strategies'; add a suite-level strategy list"
         )
 
-    v2_strategy = None
+    strategy = None
     if suite_version == "v2":
-        v2_strategy = resolve_v2_strategy(suite_strategies)
-        if v2_strategy is None:
+        strategy = resolve_v2_strategy(suite_strategies)
+        if strategy is None:
             raise SystemExit(
                 "ERROR: unable to determine V2 strategy; set LAPP_STRATEGY to one of: "
                 f"{', '.join(sorted(V2_STRATEGIES))}"
             )
+    elif LAPP_STRATEGY:
+        if LAPP_STRATEGY not in V2_STRATEGIES:
+            raise SystemExit(
+                f"ERROR: invalid LAPP_STRATEGY {LAPP_STRATEGY!r}; "
+                f"expected one of: {', '.join(sorted(V2_STRATEGIES))}"
+            )
+        strategy = LAPP_STRATEGY
 
     lapp_binary = shutil.which("lapp")
-    needs_lapp = not (suite_version == "v2" and v2_strategy == "native-edit")
+    needs_lapp = strategy != "native-edit"
     if not lapp_binary and needs_lapp:
         print("ERROR: lapp not in PATH — run: go install ./cmd/lapp",
               file=sys.stderr)
@@ -997,7 +1002,7 @@ def main() -> None:
 
     skip_existing = os.environ.get("SKIP_EXISTING", "1") != "0"
     results_dir = canonical_results_dir(
-        suite_name, v2_strategy if suite_version == "v2" else None
+        suite_name, strategy if suite_version == "v2" else None
     )
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1013,7 +1018,7 @@ def main() -> None:
         result = run_instance(
             instance,
             lapp_binary,
-            strategy=v2_strategy if suite_version == "v2" else None,
+            strategy=strategy,
         )
         result.setdefault("benchmark_version", suite_version)
         result.setdefault("suite", suite_name or "ad-hoc")
@@ -1029,7 +1034,7 @@ def main() -> None:
                     f"ERROR: missing V2 metadata for {iid}; expected fields "
                     f"{', '.join(V2_METADATA_FIELDS)}"
                 )
-            result["strategy"] = v2_strategy
+            result["strategy"] = strategy
         out_path.write_text(json.dumps(result, indent=2))
 
         if "error" in result and "a" not in result:
