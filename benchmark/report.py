@@ -219,9 +219,12 @@ def main() -> None:
         )
 
         if not err_a and not err_b:
-            sum_a_out  += a_out;  sum_b_out  += b_out
-            sum_a_in   += a_in;   sum_b_in   += b_in
-            sum_a_cost += a_cost; sum_b_cost += b_cost
+            sum_a_out += a_out
+            sum_b_out += b_out
+            sum_a_in += a_in
+            sum_b_in += b_in
+            sum_a_cost += a_cost
+            sum_b_cost += b_cost
             sim_a_vals.append(sim_a)
             sim_b_vals.append(sim_b)
 

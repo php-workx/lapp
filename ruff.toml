@@ -1,0 +1,20 @@
+# Ruff configuration for lapp Python files (benchmark harness).
+# Benchmark fixtures are upstream SWE-bench code snapshots — exclude them.
+
+extend-exclude = ["benchmark/files"]
+
+line-length = 200  # prompt templates contain long f-strings; 120 is too tight
+
+[lint]
+select = ["A", "B", "E", "F", "I", "W"]
+
+[lint.flake8-bugbear]
+# B023: loop variable capture in closures — false positives for table-formatting helpers
+extend-immutable-calls = []
+
+[lint.per-file-ignores]
+# Prompt builder functions use long template strings by design
+"benchmark/run.py" = ["E501"]
+# Table formatting uses widths[] in nested closures (B023 false positive)
+"benchmark/v1_report.py" = ["B023"]
+"benchmark/v2_report.py" = ["B023"]

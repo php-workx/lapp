@@ -20,7 +20,6 @@ Usage:
     SKIP_EXISTING=0 python benchmark/run.py           # re-run all
 """
 
-import copy
 import difflib
 import json
 import os
@@ -356,13 +355,13 @@ def strategy_hint(strategy: str, agent: str) -> str:
             f"For repeated edits in one file, your FIRST attempt must be {apply_tool} if the full unified diff is provided. Only if {apply_tool} fails should you use {replace_tool} for multi-line replacements. "
             f"For insertion-only multi-line changes, use {insert_tool} after locating the exact anchor block. Only if {replace_tool} fails with multiple matches or stale refs, use {find_tool} once to recover the exact range, then {edit_tool}."
         )
-    
+
 
     return ""
 
 
 def _indent(text: str) -> str:  # prefix every line with 4 spaces for readability
-    return "\n".join(f"    {l}" for l in text.splitlines())
+    return "\n".join(f"    {line}" for line in text.splitlines())
 
 
 def patch_similarity(applied: str, reference: str) -> float:
@@ -788,7 +787,7 @@ def run_instance(instance: dict, lapp_binary: str, strategy: str | None = None) 
             lapp_mcp  = tmp_path / "lapp.json"
             write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
 
-            print(f"    [A] Read → Edit  (claude)", flush=True)
+            print("    [A] Read → Edit  (claude)", flush=True)
             prompt_a = build_prompt(PROMPT_A, work_dir, iid, strategy="native-edit")
             result_a = run_claude(prompt_a, TOOLS_A, empty_mcp, work_dir)
             diff_a   = capture_diff(work_dir, iid)
@@ -797,7 +796,7 @@ def run_instance(instance: dict, lapp_binary: str, strategy: str | None = None) 
             write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
 
             if run_strategy == "native-edit":
-                print(f"    [B] Read → Edit  (claude)", flush=True)
+                print("    [B] Read → Edit  (claude)", flush=True)
                 prompt_b = build_prompt(PROMPT_A, work_dir, iid, strategy="native-edit")
                 result_b = run_claude(prompt_b, TOOLS_A, empty_mcp, work_dir)
             else:
@@ -929,7 +928,7 @@ def main() -> None:
     suite_name, suite_file = _parse_args()
 
     if not INSTANCES_FILE.exists():
-        print(f"ERROR: instances.json not found — run fetch_instances.py first.",
+        print("ERROR: instances.json not found — run fetch_instances.py first.",
               file=sys.stderr)
         sys.exit(1)
 
