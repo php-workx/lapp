@@ -129,7 +129,7 @@ func TestParseRef_ValidEOF(t *testing.T) {
 // TestParseRef_Rejects verifies that malformed refs are all rejected with an error.
 func TestParseRef_Rejects(t *testing.T) {
 	bad := []string{
-		"abc#ZZ",  // non-numeric line number
+		"abc#ZZ", // non-numeric line number
 		"5#zz",   // lowercase hash chars
 		"5",      // no '#' and not a sentinel
 		"",       // empty string
