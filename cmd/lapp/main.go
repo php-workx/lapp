@@ -19,8 +19,8 @@ var buildVersion = "dev"
 // multiFlag is a custom flag.Value for repeatable string flags (e.g. --block, --allow).
 type multiFlag []string
 
-func (m *multiFlag) String() string        { return strings.Join(*m, ",") }
-func (m *multiFlag) Set(v string) error    { *m = append(*m, v); return nil }
+func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func mustGetwd() string {
 	dir, err := os.Getwd()
@@ -33,11 +33,11 @@ func mustGetwd() string {
 
 func main() {
 	// Flags.
-	rootFlag      := flag.String("root", envOr("LAPP_ROOT", mustGetwd()), "Restrict file operations to this directory tree")
-	limitFlag     := flag.Int("limit", envInt("LAPP_LIMIT", 2000), "Default max lines returned by lapp_read")
-	logFileFlag   := flag.String("log-file", envOr("LAPP_LOG_FILE", ""), "Write server logs here (default: stderr)")
+	rootFlag := flag.String("root", envOr("LAPP_ROOT", mustGetwd()), "Restrict file operations to this directory tree")
+	limitFlag := flag.Int("limit", envInt("LAPP_LIMIT", 2000), "Default max lines returned by lapp_read")
+	logFileFlag := flag.String("log-file", envOr("LAPP_LOG_FILE", ""), "Write server logs here (default: stderr)")
 	onlyToolsFlag := flag.String("only-tools", envOr("LAPP_ONLY_TOOLS", ""), "Comma-separated allow-list of exposed lapp tools")
-	versionFlag   := flag.Bool("version", false, "Print version and exit")
+	versionFlag := flag.Bool("version", false, "Print version and exit")
 
 	var blockPatterns multiFlag
 	var allowPatterns multiFlag
@@ -53,7 +53,7 @@ func main() {
 
 	// Configure log output.
 	if logPath := *logFileFlag; logPath != "" {
-		f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "lapp: cannot open log file %q: %v\n", logPath, err)
 			os.Exit(1)
@@ -99,7 +99,6 @@ func main() {
 		}
 	}
 
-
 	cfg := &fileio.Config{
 		Root:          root,
 		BlockPatterns: blocks,
@@ -110,7 +109,7 @@ func main() {
 	// Startup: remove orphaned *.lapp.tmp files older than 5 minutes (§9.1).
 	// Runs asynchronously so large trees don't delay server boot.
 	go fileio.CleanupOrphans(root)
-	
+
 	if err := server.New(cfg).Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "lapp: server error: %v\n", err)
 		os.Exit(1)

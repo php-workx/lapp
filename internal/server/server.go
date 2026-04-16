@@ -2,8 +2,8 @@ package server
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +16,7 @@ import (
 	"github.com/lapp-dev/lapp/pkg/hashline"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
-	)
+)
 
 const version = "0.1.0"
 
@@ -26,14 +26,14 @@ type Server struct {
 	mcpS  *mcpserver.MCPServer
 	mu    sync.Mutex
 	guard map[string]*fileGuardState
-	}
+}
 
 type fileGuardState struct {
 	recentFindBlocks int
 	recentSearchOps  int
 	lastAnchorSig    string
 	staleCount       int
-	}
+}
 type operationWarning struct {
 	Status  string `json:"status"`
 	Code    string `json:"code"`
@@ -48,8 +48,6 @@ type operationSuccess struct {
 	Diff         string             `json:"diff,omitempty"`
 	Warnings     []operationWarning `json:"warnings,omitempty"`
 }
-
-
 
 // New creates and configures an MCP server. Emits a CLAUDE.md hint to stderr.
 func New(cfg *fileio.Config) *Server {
@@ -105,14 +103,14 @@ func (s *Server) recordFindBlock(path string) {
 	defer s.mu.Unlock()
 	st := s.stateFor(path)
 	st.recentFindBlocks++
-	}
+}
 
 func (s *Server) recordSearchOp(path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.stateFor(path)
 	st.recentSearchOps++
-	}
+}
 
 func (s *Server) consumeSearchWarning(path string) *operationWarning {
 	s.mu.Lock()
@@ -168,7 +166,7 @@ func marshalGuardedStalePayload(payload editor.StaleRefRepairResult, apply func(
 	return string(jsonBytes)
 }
 
-func marshalSuccessResponse(message string, path string, result *editor.EditResult, warnings ...*operationWarning) string {
+func marshalSuccessResponse(message, path string, result *editor.EditResult, warnings ...*operationWarning) string {
 	resp := operationSuccess{Status: "ok", Message: message, Path: path}
 	if result != nil {
 		resp.LinesChanged = result.LinesChanged
@@ -183,8 +181,6 @@ func marshalSuccessResponse(message string, path string, result *editor.EditResu
 	return string(jsonBytes)
 }
 
-
-
 func (s *Server) toolEnabled(name string) bool {
 	if s.cfg == nil || len(s.cfg.EnabledTools) == 0 {
 		return true
@@ -196,7 +192,6 @@ func (s *Server) toolEnabled(name string) bool {
 	}
 	return false
 }
-
 
 func (s *Server) registerTools() {
 	// lapp_read
@@ -310,10 +305,7 @@ func (s *Server) registerTools() {
 	if s.toolEnabled("lapp_apply_patch") {
 		s.mcpS.AddTool(applyPatchTool, s.handleApplyPatch)
 	}
-
-
 }
-
 
 func (s *Server) handleRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
@@ -369,8 +361,8 @@ func (s *Server) handleRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	}
 
 	if end < totalLines {
-		sb.WriteString(fmt.Sprintf("[Showing lines %d-%d of %d. Use offset=%d to read more.]\n",
-			offset, offset+limit-1, totalLines, offset+limit))
+		fmt.Fprintf(&sb, "[Showing lines %d-%d of %d. Use offset=%d to read more.]\n",
+			offset, offset+limit-1, totalLines, offset+limit)
 	}
 
 	s.recordSearchOp(canonical)
@@ -466,7 +458,7 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 
 	// Create parent dirs first so CheckPath can EvalSymlinks on the parent.
-	if err := os.MkdirAll(filepath.Dir(cleaned), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cleaned), 0o755); err != nil {
 		return mcp.NewToolResultError("cannot create parent dirs: " + err.Error()), nil
 	}
 
@@ -483,14 +475,14 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	// os.Link fails with EEXIST if the destination was created concurrently,
 	// preventing the race between Stat and rename.
 	tmpPath := fmt.Sprintf("%s.%d.%s.lapp.tmp", canonical, os.Getpid(), fileio.RandomHex(8))
-	f, createErr := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, createErr := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if createErr != nil {
 		if os.IsPermission(createErr) {
 			return mcp.NewToolResultError(fileio.ErrPermissionDenied), nil
 		}
 		return mcp.NewToolResultError("cannot create temp file: " + createErr.Error()), nil
 	}
-	if _, writeErr := f.Write([]byte(content)); writeErr != nil {
+	if _, writeErr := f.WriteString(content); writeErr != nil {
 		f.Close()
 		os.Remove(tmpPath)
 		if os.IsPermission(writeErr) {
@@ -503,7 +495,7 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		return mcp.NewToolResultError("cannot write file: " + closeErr.Error()), nil
 	}
 	// Restore conventional source file permissions before making it visible.
-	if chmodErr := os.Chmod(tmpPath, 0644); chmodErr != nil {
+	if chmodErr := os.Chmod(tmpPath, 0o644); chmodErr != nil {
 		os.Remove(tmpPath)
 		return mcp.NewToolResultError("cannot set file permissions: " + chmodErr.Error()), nil
 	}
@@ -519,7 +511,7 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	os.Remove(tmpPath)
 
 	lines := strings.Count(content, "\n")
-	if len(content) > 0 && content[len(content)-1] != '\n' {
+	if content != "" && content[len(content)-1] != '\n' {
 		lines++
 	}
 	resp := marshalSuccessResponse(fmt.Sprintf("OK: created %s (%d lines)", path, lines), canonical, nil)
@@ -590,18 +582,22 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		}
 	}
 
+	const (
+		fmtText       = "text"
+		fmtStructured = "structured"
+	)
 	const maxCtxLines = 10
 	if ctxLines > maxCtxLines {
 		ctxLines = maxCtxLines
 	}
 
-	format := "text"
+	format := fmtText
 	if v, ok := args["format"]; ok {
 		if s, ok2 := v.(string); ok2 && s != "" {
 			format = s
 		}
 	}
-	if format != "text" && format != "structured" {
+	if format != fmtText && format != fmtStructured {
 		return mcp.NewToolResultError("invalid format: must be text or structured"), nil
 	}
 
@@ -641,7 +637,7 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		if d.IsDir() {
 			return nil
 		}
-		if filesMatched >= maxGrepFiles || (format == "text" && outputLines >= maxOutputLines) || (format == "structured" && len(structuredMatches) >= maxStructuredMatches) {
+		if filesMatched >= maxGrepFiles || (format == fmtText && outputLines >= maxOutputLines) || (format == fmtStructured && len(structuredMatches) >= maxStructuredMatches) {
 			return errCapReached
 		}
 
@@ -678,7 +674,7 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		}
 
 		filesMatched++
-		if format == "structured" {
+		if format == fmtStructured {
 			for _, m := range matches {
 				before := []string{}
 				after := []string{}
@@ -689,12 +685,12 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 					after = append(after, hashline.FormatLine(lines[k-1], k))
 				}
 				structuredMatches = append(structuredMatches, grepStructuredMatch{
-					Path: canonical,
-					Anchor: fmt.Sprintf("%d#%s", m, hashline.HashLine(lines[m-1], m)),
-					LineNumber: m,
-					Line: lines[m-1],
+					Path:          canonical,
+					Anchor:        fmt.Sprintf("%d#%s", m, hashline.HashLine(lines[m-1], m)),
+					LineNumber:    m,
+					Line:          lines[m-1],
 					ContextBefore: before,
-					ContextAfter: after,
+					ContextAfter:  after,
 				})
 			}
 			s.recordSearchOp(canonical)
@@ -752,7 +748,7 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		return mcp.NewToolResultText(string(jsonBytes)), nil
 	}
 	if walkErr == errCapReached {
-		sb.WriteString(fmt.Sprintf("\n[Results truncated: showed %d files / %d lines. Narrow your pattern or path.]", filesMatched, outputLines))
+		fmt.Fprintf(&sb, "\n[Results truncated: showed %d files / %d lines. Narrow your pattern or path.]", filesMatched, outputLines)
 	}
 
 	result := sb.String()
@@ -761,7 +757,6 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	}
 	return mcp.NewToolResultText(result), nil
 }
-
 
 type blockMatch struct {
 	Path    string   `json:"path"`
@@ -828,7 +823,6 @@ func parseUnifiedPatch(content string) ([]patchHunk, error) {
 	return hunks, nil
 }
 
-
 type grepStructuredMatch struct {
 	Path          string   `json:"path"`
 	Anchor        string   `json:"anchor"`
@@ -883,7 +877,6 @@ func stripSharedIndent(lines []string) []string {
 	return out
 }
 
-
 func sharedIndentString(lines []string) string {
 	minIndent := -1
 	indentStr := ""
@@ -915,7 +908,7 @@ func rebaseBlockIndent(oldBlock, newBlock []string) []string {
 			continue
 		}
 		out[i] = oldIndent + line
-		}
+	}
 	return out
 }
 
@@ -996,18 +989,18 @@ func buildBlockStaleRepairPayload(lines []string, best blockRange, mismatchLines
 		}
 		line := lines[lineNum-1]
 		changed = append(changed, editor.StaleRefRepairLine{
-			Anchor: fmt.Sprintf("%d#%s", lineNum, hashline.HashLine(line, lineNum)),
+			Anchor:     fmt.Sprintf("%d#%s", lineNum, hashline.HashLine(line, lineNum)),
 			LineNumber: lineNum,
-			Line: line,
+			Line:       line,
 		})
 	}
 	return editor.StaleRefRepairResult{
-		Status: "stale_refs",
+		Status:    "stale_refs",
 		ErrorCode: editor.ErrHashMismatch,
-		Message: message,
-		Count: len(changed),
-		Changed: changed,
-		Note: fmt.Sprintf("Closest matching region is lines %d-%d. Use the returned anchors to re-read or rebuild the edit.", best.start, best.end),
+		Message:   message,
+		Count:     len(changed),
+		Changed:   changed,
+		Note:      fmt.Sprintf("Closest matching region is lines %d-%d. Use the returned anchors to re-read or rebuild the edit.", best.start, best.end),
 	}
 }
 
@@ -1059,9 +1052,9 @@ func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (
 			preview = append(preview, hashline.FormatLine(lines[k-1], k))
 		}
 		matches = append(matches, blockMatch{
-			Path: canonical,
-			Start: fmt.Sprintf("%d#%s", startLine, hashline.HashLine(lines[startLine-1], startLine)),
-			End: fmt.Sprintf("%d#%s", endLine, hashline.HashLine(lines[endLine-1], endLine)),
+			Path:    canonical,
+			Start:   fmt.Sprintf("%d#%s", startLine, hashline.HashLine(lines[startLine-1], startLine)),
+			End:     fmt.Sprintf("%d#%s", endLine, hashline.HashLine(lines[endLine-1], endLine)),
 			Preview: preview,
 		})
 	}
@@ -1169,7 +1162,6 @@ func (s *Server) handleInsertBlock(ctx context.Context, req mcp.CallToolRequest)
 	return mcp.NewToolResultText(resp), nil
 }
 
-
 func (s *Server) handleApplyPatch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
@@ -1256,7 +1248,6 @@ func (s *Server) handleApplyPatch(ctx context.Context, req mcp.CallToolRequest) 
 	resp := marshalSuccessResponse(fmt.Sprintf("OK: %d line(s) changed", result.LinesChanged), canonical, result, searchWarn)
 	return mcp.NewToolResultText(resp), nil
 }
-
 
 func (s *Server) handleReplaceBlock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")

@@ -152,11 +152,13 @@ func preserveSingleLineIndent(originalLine string, replacement []string) []strin
 
 // normalizeRef accepts refs copied or retyped from lapp_read/lapp_grep output.
 // Valid inputs include:
-//   LINE#HASH
-//   LINE#HASH:
-//   LINE#HASH:full line text
-//   LINE:HASH            (model separator mistake; normalized to LINE#HASH)
-//   LINE:HASH:full line  (same, with pasted display content)
+//
+//	LINE#HASH
+//	LINE#HASH:
+//	LINE#HASH:full line text
+//	LINE:HASH            (model separator mistake; normalized to LINE#HASH)
+//	LINE:HASH:full line  (same, with pasted display content)
+//
 // Special anchors 0: and EOF: are preserved unchanged.
 func normalizeRef(ref string) string {
 	if ref == "0:" || ref == "EOF:" {
@@ -421,7 +423,7 @@ func FormatMismatchError(mismatches []RefMismatch, lines []string) string {
 		suffix = " has"
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%d line%s changed since last read. Use the updated LINE#HASH references below (>>> marks changed lines).", n, suffix))
+	fmt.Fprintf(&sb, "%d line%s changed since last read. Use the updated LINE#HASH references below (>>> marks changed lines).", n, suffix)
 	sb.WriteString("\n")
 
 	prev := -1
@@ -438,9 +440,9 @@ func FormatMismatchError(mismatches []RefMismatch, lines []string) string {
 		currentHash := hashline.HashLine(content, lineNum)
 		ref := fmt.Sprintf("%d#%s", lineNum, currentHash)
 		if _, bad := mismatchSet[lineNum]; bad {
-			sb.WriteString(fmt.Sprintf(">>> %s:%s\n", ref, content))
+			fmt.Fprintf(&sb, ">>> %s:%s\n", ref, content)
 		} else {
-			sb.WriteString(fmt.Sprintf("    %s:%s\n", ref, content))
+			fmt.Fprintf(&sb, "    %s:%s\n", ref, content)
 		}
 	}
 
@@ -449,8 +451,8 @@ func FormatMismatchError(mismatches []RefMismatch, lines []string) string {
 	for _, m := range mismatches {
 		if m.OutOfRange {
 			// No current hash exists for a line beyond EOF — print actionable guidance.
-			sb.WriteString(fmt.Sprintf("  %d#%s → (line %d does not exist — re-read the file)\n",
-				m.Line, m.Expected, m.Line))
+			fmt.Fprintf(&sb, "  %d#%s \xe2\x86\x92 (line %d does not exist \xe2\x80\x94 re-read the file)\n",
+				m.Line, m.Expected, m.Line)
 			continue
 		}
 		var content string
@@ -458,13 +460,13 @@ func FormatMismatchError(mismatches []RefMismatch, lines []string) string {
 			content = lines[m.Line-1]
 		}
 		currentHash := hashline.HashLine(content, m.Line)
-		sb.WriteString(fmt.Sprintf("  %d#%s → %d#%s\n", m.Line, m.Expected, m.Line, currentHash))
+		fmt.Fprintf(&sb, "  %d#%s → %d#%s\n", m.Line, m.Expected, m.Line, currentHash)
 	}
 
 	return sb.String()
 }
 
-
+// BuildStaleRefRepairResult produces a human-readable repair payload for stale references.
 func BuildStaleRefRepairResult(mismatches []RefMismatch, lines []string) *StaleRefRepairResult {
 	seen := map[int]bool{}
 	changed := []StaleRefRepairLine{}
@@ -476,18 +478,18 @@ func BuildStaleRefRepairResult(mismatches []RefMismatch, lines []string) *StaleR
 		line := lines[m.Line-1]
 		anchor := fmt.Sprintf("%d#%s", m.Line, hashline.HashLine(line, m.Line))
 		changed = append(changed, StaleRefRepairLine{
-			Anchor: anchor,
+			Anchor:     anchor,
 			LineNumber: m.Line,
-			Line: line,
+			Line:       line,
 		})
 	}
 	return &StaleRefRepairResult{
-		Status: "stale_refs",
+		Status:    "stale_refs",
 		ErrorCode: ErrHashMismatch,
-		Message: fmt.Sprintf("%d line(s) changed since last read. Retry with the updated refs below.", len(changed)),
-		Count: len(changed),
-		Changed: changed,
-		Note: "Use the returned anchors directly in your retry instead of rereading the whole file.",
+		Message:   fmt.Sprintf("%d line(s) changed since last read. Retry with the updated refs below.", len(changed)),
+		Count:     len(changed),
+		Changed:   changed,
+		Note:      "Use the returned anchors directly in your retry instead of rereading the whole file.",
 	}
 }
 
@@ -640,7 +642,7 @@ func applyOne(pe parsedEdit, lines []string) []string {
 			newContent = splitContent(*e.Content)
 			if pe.startLine == pe.endLine && pe.startLine >= 1 && pe.startLine <= len(lines) {
 				// Single-line anchored replacements should preserve the original line's
- 				// indentation unless the caller uses a broader range edit. Models often
+				// indentation unless the caller uses a broader range edit. Models often
 				// change leading whitespace accidentally when rewriting one code line.
 				newContent = preserveSingleLineIndent(lines[pe.startLine-1], newContent)
 			}
@@ -689,7 +691,7 @@ func applyOne(pe parsedEdit, lines []string) []string {
 
 // splice replaces lines[start:end] with replacement, returning the new slice.
 func splice(lines []string, start, end int, replacement []string) []string {
-	result := make([]string, 0, len(lines)-( end-start)+len(replacement))
+	result := make([]string, 0, len(lines)-(end-start)+len(replacement))
 	result = append(result, lines[:start]...)
 	result = append(result, replacement...)
 	result = append(result, lines[end:]...)
@@ -764,8 +766,8 @@ func generateDiff(original, updated []string, path string) (string, int) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("--- a/%s\n", path))
-	sb.WriteString(fmt.Sprintf("+++ b/%s\n", path))
+	fmt.Fprintf(&sb, "--- a/%s\n", path)
+	fmt.Fprintf(&sb, "+++ b/%s\n", path)
 
 	added, removed := 0, 0
 	// Track line numbers by walking ops from the start each hunk.
@@ -796,7 +798,7 @@ func generateDiff(original, updated []string, path string) (string, int) {
 				newCount++
 			}
 		}
-		sb.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount))
+		fmt.Fprintf(&sb, "@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount)
 		for _, op := range ops[h.start:h.end] {
 			sb.WriteByte(byte(op.kind))
 			sb.WriteString(op.line)
