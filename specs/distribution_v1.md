@@ -237,45 +237,47 @@ const agents = {
     displayName: "Codex",
     skillsDir: ".codex/skills",
     globalSkillsDir: "~/.codex/skills",
-    detectInstalled: () => existsSync("~/.codex"),
+    detectInstalled: () => existsSync(path.join(os.homedir(), ".codex")),
   },
   cursor: {
     name: "cursor",
     displayName: "Cursor",
     skillsDir: ".cursor/skills",
     globalSkillsDir: "~/.cursor/skills",
-    detectInstalled: () => existsSync("~/.cursor"),
+    detectInstalled: () => existsSync(path.join(os.homedir(), ".cursor")),
   },
   windsurf: {
     name: "windsurf",
     displayName: "Windsurf",
     skillsDir: ".windsurf/skills",
     globalSkillsDir: "~/.codeium/windsurf/skills",
-    detectInstalled: () => existsSync("~/.codeium/windsurf"),
+    detectInstalled: () => existsSync(path.join(os.homedir(), ".codeium", "windsurf")),
   },
   opencode: {
     name: "opencode",
     displayName: "OpenCode",
     skillsDir: ".opencode/skills",
     globalSkillsDir: "~/.config/opencode/skills",
-    detectInstalled: () => existsSync("~/.config/opencode"),
+    detectInstalled: () => existsSync(path.join(os.homedir(), ".config", "opencode")),
   },
   amp: {
     name: "amp",
     displayName: "Amp",
     skillsDir: ".agents/skills",
     globalSkillsDir: "~/.config/agents/skills",
-    detectInstalled: () => existsSync("~/.config/amp"),
+    detectInstalled: () => existsSync(path.join(os.homedir(), ".config", "amp")),
   },
   antigravity: {
     name: "antigravity",
     displayName: "Antigravity",
     skillsDir: ".agent/skills",
     globalSkillsDir: "~/.gemini/antigravity/skills",
-    detectInstalled: () => existsSync("~/.gemini/antigravity"),
+    detectInstalled: () => existsSync(path.join(os.homedir(), ".gemini", "antigravity")),
   },
 };
 ```
+
+> **Note:** Both `detectInstalled` and `globalSkillsDir` values that contain `~` must be expanded at runtime. `detectInstalled` already uses `path.join(os.homedir(), ...)` (Node.js `fs` does not expand `~`). Similarly, `globalSkillsDir` strings like `"~/.claude/skills"` are convention-based — the installer must resolve them with `path.join(os.homedir(), ...)` when reading or writing to those paths.
 
 ### 6.2 MCP Config Paths
 
