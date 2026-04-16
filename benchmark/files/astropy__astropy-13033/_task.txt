@@ -39,6 +39,7 @@ your code snippet. -->
 reveal secrets like tokens and passwords. -->
 
 ```python
+import numpy as np
 from astropy.time import Time
 from astropy.timeseries import TimeSeries
 
