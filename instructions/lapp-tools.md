@@ -20,8 +20,11 @@ Load via `instructions` array — always active, no skill load needed.
 
 **Full-read:** `lapp_read` → pick refs → `lapp_edit` (batch all edits in one call)
 
-**Hash mismatch / stale refs:** if lapp returns `stale_refs`, retry with the returned local anchors — do not re-read the whole file.
+**Hash mismatch / stale refs:** if lapp returns `stale_refs`, retry with the returned local anchors — do not re-read the whole file. If the same region returns `stale_refs` repeatedly, reuse the fresh anchors directly instead of broad grep/read calls.
 
+**Repeated search warning:** if lapp warns that you searched or reread the same file repeatedly before editing, switch to a more direct helper such as `lapp_replace_block`, `lapp_insert_block`, or `lapp_apply_patch` depending on the change shape.
+
+**Multiline helper recommendation:** if lapp warns that you are repeating `lapp_find_block` + `lapp_edit` on the same file, switch to `lapp_replace_block` for exact block replacements.
 ## Rules
 
 - Prefer lapp tools over native read/edit whenever available
