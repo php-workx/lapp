@@ -194,6 +194,7 @@ def main() -> None:
     print(f"\nDone. Files saved to {FILES_DIR}/")
     if failed:
         print(f"Failed: {', '.join(failed)}", file=sys.stderr)
+        sys.exit(1)
     else:
         print("Run 'python benchmark/run.py' to start benchmarking.")
 
