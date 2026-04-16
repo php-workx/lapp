@@ -1,6 +1,10 @@
 # lapp project quality gate
 # Single source of truth for "my code is clean" — hooks and CI delegate here.
 
+# Allow Go to download newer toolchains as needed (spec requires Go 1.24+,
+# dev tools like golangci-lint need 1.25+). GOTOOLCHAIN=auto lets Go manage this.
+export GOTOOLCHAIN := "auto"
+
 # Developer tools are pinned in tools.mod and invoked through go tool.
 go_tool := "go tool -modfile=tools.mod"
 
