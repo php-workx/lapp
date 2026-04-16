@@ -15,13 +15,8 @@ import (
 // Returns an empty string on success, or an error code on failure.
 func RenameAtomic(src, dst string) string {
 	if err := os.Rename(src, dst); err != nil {
-		var winErr *os.PathError
-		if errors.As(err, &winErr) {
-			if errno, ok := winErr.Err.(windows.Errno); ok {
-				if errno == windows.ERROR_SHARING_VIOLATION {
-					return "Cannot write: another process has the file open. Close it in your editor and retry."
-				}
-			}
+		if errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+			return "Cannot write: another process has the file open. Close it in your editor and retry."
 		}
 		if os.IsPermission(err) {
 			return ErrPermissionDenied

@@ -18,7 +18,7 @@ const (
 	ErrTooManyEdits     = "ERR_TOO_MANY_EDITS"
 	ErrLocked           = "ERR_LOCKED"
 	ErrHashMismatch     = "ERR_HASH_MISMATCH"
-	ErrStaleRefs        = "STALE_REFS"
+	ErrStaleRefs        = "ERR_STALE_REFS"
 )
 
 // EditType identifies the kind of mutation an Edit performs.
