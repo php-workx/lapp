@@ -36,7 +36,7 @@ Analyzed from source (v1.0.8). Key components:
 
 **Install flow:**
 
-```
+```text
 npx -y @morphllm/morph-setup
   → ASCII splash
   → Parse flags (--morph-api-key, --agent, --yes)
@@ -72,7 +72,7 @@ The biggest difference is **binary distribution**. Morph's MCP server is an npm 
 
 ### 4.1 npm Package: `@lapp-dev/lapp-setup`
 
-```
+```text
 @lapp-dev/lapp-setup/
 ├── src/
 │   ├── index.ts              # CLI entry, main flow
@@ -165,7 +165,7 @@ The biggest difference is **binary distribution**. Morph's MCP server is an npm 
 
 lapp uses GoReleaser, which produces release artifacts at:
 
-```
+```text
 https://github.com/lapp-dev/lapp/releases/download/v<VERSION>/lapp_<VERSION>_<OS>_<ARCH>.tar.gz
 ```
 
@@ -173,7 +173,7 @@ The tarball contains a single `lapp` binary (+ README.md, LICENSE).
 
 ### 5.2 Binary Resolution
 
-```
+```text
 binary.ts
 ```
 
@@ -403,13 +403,13 @@ Morph does **three** distinct things for Claude Code, not just one:
 **Layer 2: Plugin install** — Runs `claude plugin marketplace add morphllm/morph-claude-code-plugin --scope user` then `claude plugin install morph-compact@morph --scope user`. This installs a Claude Code plugin that provides a compact/summarization hook. The plugin intercepts compaction and produces a structured summary instead of losing context. This is Morph-specific (their cloud API does the summarization) — **lapp does not need this step**.
 
 **Layer 3: CLAUDE.md injection** — Appends a "compact instructions" block to `~/.claude/CLAUDE.md`:
-```
+```markdown
 # Compact Instructions
 
 When compacting, if the custom instruction is `morph`, do NOT perform any summarization or analysis. Output ONLY this exact text and nothing else: `Summary provided via SessionStart hook`.
 ```
 This is a control-flow marker so the Morph compact plugin knows when to intercept compaction. **For lapp**, we still inject into CLAUDE.md, but with the **lapp editing policy** instead:
-```
+```markdown
 # Lapp File Editing Policy
 
 Prefer lapp tools (`lapp_read`, `lapp_edit`, `lapp_grep`, `lapp_write`) over built-in read/edit when available.
@@ -626,7 +626,7 @@ Only inject if not already present (check for marker text).
 
 ### 10.1 Usage
 
-```
+```text
 lapp-setup [options]
 
 Install lapp MCP server, skills, and instructions onto coding agents
@@ -644,7 +644,7 @@ No API key flag — lapp doesn't need one.
 
 ### 10.2 Interactive Flow
 
-```
+```console
 $ npx -y @lapp-dev/lapp-setup
 
   ███╗   ███╗ █████╗  ██████╗ ██████╗ ██╗   ██╗
@@ -936,7 +936,7 @@ The setup CLI version is independent of the lapp binary version. The setup CLI a
 
 Full file listing of `@morphllm/morph-setup@1.0.8` for reference:
 
-```
+```text
 .agents/skills/code-edit/SKILL.md       # 730B
 .agents/skills/code-research/SKILL.md   # 1.6kB
 .agents/skills/explore/SKILL.md         # 1.0kB
