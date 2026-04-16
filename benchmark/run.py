@@ -615,7 +615,6 @@ def run_opencode(
                 last_error = str(err_data.get("data", {}).get("message", err_data))[:200]
         except json.JSONDecodeError:
             pass
-            pass
 
     if last_error and output_tokens == 0:
         return _err(last_error)
