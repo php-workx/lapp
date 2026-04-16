@@ -24,11 +24,12 @@ const (
 // EditType identifies the kind of mutation an Edit performs.
 type EditType string
 
+// Edit operations supported by the edit tool.
 const (
-	EditReplace      EditType = "replace"
-	EditInsertAfter  EditType = "insert_after"
-	EditInsertBefore EditType = "insert_before"
-	EditDelete       EditType = "delete"
+	EditReplace      EditType = "replace"       // overwrite lines at the given address
+	EditInsertAfter  EditType = "insert_after"  // insert after the given line
+	EditInsertBefore EditType = "insert_before" // insert before the given line
+	EditDelete       EditType = "delete"        // delete the given line
 )
 
 // Edit describes a single mutation to a file.
@@ -62,9 +63,9 @@ type EditResult struct {
 // agent has not (or no longer has) current file content. The response always
 // carries the current hashline-formatted file so the agent can re-anchor.
 type SelfCorrectResult struct {
-	Status      string `json:"status"`           // always "needs_read_first"
+	Status      string `json:"status"` // always "needs_read_first"
 	Message     string `json:"message"`
-	FileContent string `json:"file_content"`     // hashline-formatted content
+	FileContent string `json:"file_content"` // hashline-formatted content
 	// Note is always set in this implementation.
 	// The spec §5.1 describes a two-phase flow (absent on first failure, set on second),
 	// but MCP is stateless so consecutive-failure tracking is not possible.
@@ -77,17 +78,17 @@ type SelfCorrectResult struct {
 // against the current file contents. It carries fresh local anchors so the
 // model can retry without rereading the full file.
 type StaleRefRepairResult struct {
-	Status    string                `json:"status"`      // always "stale_refs"
-	ErrorCode string                `json:"error_code"`  // usually ERR_HASH_MISMATCH
-	Message   string                `json:"message"`
-	Count     int                   `json:"count"`
-	Changed   []StaleRefRepairLine  `json:"changed"`
-	Note      string                `json:"note,omitempty"`
+	Status    string               `json:"status"`     // always "stale_refs"
+	ErrorCode string               `json:"error_code"` // usually ERR_HASH_MISMATCH
+	Message   string               `json:"message"`
+	Count     int                  `json:"count"`
+	Changed   []StaleRefRepairLine `json:"changed"`
+	Note      string               `json:"note,omitempty"`
 }
 
+// StaleRefRepairLine is one line in a stale-ref repair result.
 type StaleRefRepairLine struct {
 	Anchor     string `json:"anchor"`
 	LineNumber int    `json:"line_number"`
 	Line       string `json:"line"`
 }
-
