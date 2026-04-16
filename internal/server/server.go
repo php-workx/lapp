@@ -457,6 +457,18 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		return mcp.NewToolResultError(fileio.ErrPathOutsideRoot), nil
 	}
 
+	// Validate parent chain for symlinks before creating directories.
+	// This prevents MkdirAll from following a symlink inside root that
+	// points outside root, which would create orphan directories.
+	parentDir := filepath.Dir(cleaned)
+	if parentDir != s.cfg.Root {
+		if resolved, err := filepath.EvalSymlinks(parentDir); err == nil {
+			if !strings.HasPrefix(resolved, s.cfg.Root+string(os.PathSeparator)) {
+				return mcp.NewToolResultError(fileio.ErrPathOutsideRoot), nil
+			}
+		}
+	}
+
 	// Create parent dirs first so CheckPath can EvalSymlinks on the parent.
 	if err := os.MkdirAll(filepath.Dir(cleaned), 0o755); err != nil {
 		return mcp.NewToolResultError("cannot create parent dirs: " + err.Error()), nil
