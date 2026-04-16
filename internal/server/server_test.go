@@ -186,6 +186,49 @@ func callReplaceBlock(t *testing.T, s *Server, filePath, oldContent, newContent 
 	return extractText(t, result)
 }
 
+func callInsertBlock(t *testing.T, s *Server, filePath, anchorContent, newContent, position string) string {
+	t.Helper()
+	args := map[string]any{
+		"path":           filePath,
+		"anchor_content": anchorContent,
+		"new_content":    newContent,
+		"position":       position,
+	}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	result, err := s.handleInsertBlock(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleInsertBlock error: %v", err)
+	}
+	return extractText(t, result)
+}
+
+func callApplyPatch(t *testing.T, s *Server, filePath, patch string) string {
+	t.Helper()
+	args := map[string]any{"path": filePath, "patch": patch}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	result, err := s.handleApplyPatch(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handleApplyPatch error: %v", err)
+	}
+	return extractText(t, result)
+}
+
+type parsedOperationSuccess struct {
+	Status       string `json:"status"`
+	Message      string `json:"message"`
+	Path         string `json:"path"`
+	LinesChanged int    `json:"lines_changed"`
+	Diff         string `json:"diff"`
+	Warnings     []struct {
+		Status  string `json:"status"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"warnings"`
+}
+
+
 type parsedFindBlock struct {
 	Matches []struct {
 		Path    string   `json:"path"`
@@ -199,6 +242,28 @@ type parsedFindBlock struct {
 // pattern as a fixed string so code containing regex metacharacters like
 // \S+, (?:...), and @? is found correctly — the exact failure seen in the
 // benchmark when searching for a URL validator regex.
+func TestToolEnabled_DefaultAllowsAll(t *testing.T) {
+	s := New(&fileio.Config{Root: t.TempDir()})
+	for _, name := range []string{"lapp_read", "lapp_edit", "lapp_apply_patch"} {
+		if !s.toolEnabled(name) {
+			t.Fatalf("expected tool %s to be enabled by default", name)
+		}
+	}
+}
+
+func TestToolEnabled_OnlyListRestrictsSurface(t *testing.T) {
+	s := New(&fileio.Config{Root: t.TempDir(), EnabledTools: []string{"lapp_read", "lapp_apply_patch"}})
+	if !s.toolEnabled("lapp_read") || !s.toolEnabled("lapp_apply_patch") {
+		t.Fatal("expected configured tools to be enabled")
+	}
+	for _, name := range []string{"lapp_edit", "lapp_grep", "lapp_replace_block"} {
+		if s.toolEnabled(name) {
+			t.Fatalf("expected tool %s to be disabled by only-tools filter", name)
+		}
+	}
+}
+
+
 func TestGrepLiteralMatchesRegexMetachars(t *testing.T) {
 	cfg := newTestConfig(t)
 	s := New(cfg)
@@ -439,6 +504,126 @@ func TestReplaceBlockAmbiguousMatchErrors(t *testing.T) {
 	}
 }
 
+
+func TestInsertBlockAfterNormalizeWhitespace(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "insert-block-after.py")
+	writeTestFile(t, filePath, "class A:\n    def f(self):\n        axis_key = sub[axis]\n        # Axis limits\n        if axis_key in p._limits:\n            pass\n")
+
+	anchor := "            axis_key = sub[axis]"
+	newBlock := "            axis_obj = getattr(ax, f\"{axis}axis\")\n\n            # Nominal scale special-casing\n            if isinstance(self._scales.get(axis_key), Nominal):\n                axis_obj.grid(False, which=\"both\")"
+	out := callInsertBlock(t, s, filePath, anchor, newBlock, "after")
+	if !strings.Contains(out, "OK:") {
+		t.Fatalf("insert block after failed: %s", out)
+	}
+	data, _ := os.ReadFile(filePath)
+	got := string(data)
+	expect := "        axis_obj = getattr(ax, f\"{axis}axis\")\n\n        # Nominal scale special-casing\n        if isinstance(self._scales.get(axis_key), Nominal):\n            axis_obj.grid(False, which=\"both\")"
+	if !strings.Contains(got, expect) {
+		t.Fatalf("expected normalized inserted block, got: %s", got)
+	}
+}
+
+func TestInsertBlockBefore(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "insert-block-before.py")
+	writeTestFile(t, filePath, "from seaborn._core.subplots import Subplots\nfrom seaborn._core.groupby import GroupBy\n")
+
+	out := callInsertBlock(t, s, filePath, "from seaborn._core.subplots import Subplots", "from seaborn._core.scales import Scale, Nominal", "before")
+	if !strings.Contains(out, "OK:") {
+		t.Fatalf("insert block before failed: %s", out)
+	}
+	data, _ := os.ReadFile(filePath)
+	got := string(data)
+	expect := "from seaborn._core.scales import Scale, Nominal\nfrom seaborn._core.subplots import Subplots"
+	if !strings.Contains(got, expect) {
+		t.Fatalf("expected inserted import before anchor, got: %s", got)
+	}
+}
+
+func TestInsertBlockStaleReturnsStructuredRepairPayload(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "insert-stale.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\ndelta\n")
+
+	writeTestFile(t, filePath, "alpha\nBETA\ngamma\ndelta\n")
+	out := callInsertBlock(t, s, filePath, "beta\ngamma", "inserted", "after")
+	var payload editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("expected stale repair JSON, got: %s\nerr: %v", out, err)
+	}
+	if payload.Status != "stale_refs" || len(payload.Changed) == 0 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Changed[0].Line, "BETA") {
+		t.Fatalf("expected updated anchor line in payload: %+v", payload)
+	}
+}
+
+
+func TestApplyPatchExactReplaceAndInsertDelete(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "apply-patch.txt")
+	writeTestFile(t, filePath, "import scale\nalpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n")
+
+	patch := strings.Join([]string{
+		"--- a/apply-patch.txt",
+		"+++ b/apply-patch.txt",
+		"@@ -1,2 +1,2 @@",
+		"-import scale",
+		"+import scale, nominal",
+		" alpha",
+		"@@ -5,3 +5,4 @@",
+		" delta",
+		" epsilon",
+		"+inserted",
+		" zeta",
+	}, "\n")
+
+	out := callApplyPatch(t, s, filePath, patch)
+	if !strings.Contains(out, "OK:") {
+		t.Fatalf("apply patch failed: %s", out)
+	}
+	data, _ := os.ReadFile(filePath)
+	got := string(data)
+	if !strings.Contains(got, "import scale, nominal") || !strings.Contains(got, "epsilon\ninserted\nzeta") {
+		t.Fatalf("file not patched correctly: %s", got)
+	}
+}
+
+func TestApplyPatchStaleReturnsStructuredRepairPayload(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "apply-patch-stale.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\n")
+	writeTestFile(t, filePath, "alpha\nBETA\ngamma\n")
+
+	patch := strings.Join([]string{
+		"--- a/apply-patch-stale.txt",
+		"+++ b/apply-patch-stale.txt",
+		"@@ -1,3 +1,3 @@",
+		" alpha",
+		"-beta",
+		"+replaced",
+		" gamma",
+	}, "\n")
+
+	out := callApplyPatch(t, s, filePath, patch)
+	var payload editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("expected stale repair JSON, got: %s\nerr: %v", out, err)
+	}
+	if payload.Status != "stale_refs" || len(payload.Changed) == 0 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	if !strings.Contains(payload.Changed[0].Line, "BETA") {
+		t.Fatalf("expected updated line in stale payload: %+v", payload)
+	}
+}
 
 // extractText pulls the text from the first TextContent item.
 func extractText(t *testing.T, r *mcp.CallToolResult) string {
@@ -781,6 +966,223 @@ func TestRoundTrip_SelfCorrect_NoteAlwaysSet(t *testing.T) {
 		t.Fatal("SelfCorrectResult.Note must always be non-empty")
 	}
 }
+
+func TestRepeatedStaleRetryStrengthensMessage(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "stale-repeat.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\n")
+
+	readOut := callRead(t, s, filePath, 0, 0)
+	staleRef := firstLineRef(t, readOut, "beta")
+	writeTestFile(t, filePath, "alpha\nBETA\ngamma\n")
+
+	firstOut := callEdit(t, s, filePath, []editor.Edit{{Type: editor.EditReplace, Anchor: staleRef, Content: strPtr("replaced")}})
+	var first editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(firstOut), &first); err != nil {
+		t.Fatalf("expected stale repair JSON on first retry, got: %s\nerr: %v", firstOut, err)
+	}
+	secondOut := callEdit(t, s, filePath, []editor.Edit{{Type: editor.EditReplace, Anchor: staleRef, Content: strPtr("replaced")}})
+	var second editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(secondOut), &second); err != nil {
+		t.Fatalf("expected stale repair JSON on second retry, got: %s\nerr: %v", secondOut, err)
+	}
+	if !strings.Contains(second.Message, "repeatedly") {
+		t.Fatalf("expected escalated stale message, got: %+v", second)
+	}
+	if !strings.Contains(second.Note, "already have fresh anchors") {
+		t.Fatalf("expected direct-anchor guidance, got: %+v", second)
+	}
+	_ = first
+}
+
+func TestRepeatedSearchThenEditAddsWarningPrefix(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "search-warning.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\n")
+
+	_ = callRead(t, s, filePath, 0, 0)
+	_ = callRead(t, s, filePath, 1, 2)
+	_ = callGrepLiteral(t, s, "beta", filePath)
+	_ = callGrepLiteral(t, s, "gamma", filePath)
+
+	readOut := callRead(t, s, filePath, 0, 0)
+	ref := firstLineRef(t, readOut, "beta")
+	out := callEdit(t, s, filePath, []editor.Edit{{Type: editor.EditReplace, Anchor: ref, Content: strPtr("BETA")}})
+	var resp parsedOperationSuccess
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("expected JSON success envelope, got: %s\nerr: %v", out, err)
+	}
+	if resp.Status != "ok" || len(resp.Warnings) == 0 || resp.Warnings[0].Code != "REPEATED_SEARCH_RECOMMENDATION" {
+		t.Fatalf("expected repeated search warning, got: %+v", resp)
+	}
+	if !strings.Contains(resp.Message, "OK:") {
+		t.Fatalf("expected OK message in envelope, got: %+v", resp)
+	}
+	data, _ := os.ReadFile(filePath)
+	if !strings.Contains(string(data), "BETA") {
+		t.Fatalf("file not updated correctly: %s", string(data))
+	}
+}
+
+
+func TestRepeatedFindBlockThenEditAddsWarningPrefix(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "multiline-warning.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\ndelta\n")
+
+	_ = callFindBlock(t, s, filePath, "beta\ngamma")
+	blockOut := callFindBlock(t, s, filePath, "beta\ngamma")
+	var parsed parsedFindBlock
+	if err := json.Unmarshal([]byte(blockOut), &parsed); err != nil {
+		t.Fatalf("expected find block JSON, got: %s\nerr: %v", blockOut, err)
+	}
+	if len(parsed.Matches) != 1 {
+		t.Fatalf("expected one block match, got: %+v", parsed)
+	}
+	out := callEdit(t, s, filePath, []editor.Edit{{Type: editor.EditReplace, Start: parsed.Matches[0].Start, End: parsed.Matches[0].End, Content: strPtr("BETA\nGAMMA")}})
+	var resp parsedOperationSuccess
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("expected JSON success envelope, got: %s\nerr: %v", out, err)
+	}
+	if resp.Status != "ok" || len(resp.Warnings) == 0 || resp.Warnings[0].Code != "MULTILINE_HELPER_RECOMMENDATION" {
+		t.Fatalf("expected multiline helper warning, got: %+v", resp)
+	}
+	data, _ := os.ReadFile(filePath)
+	if !strings.Contains(string(data), "BETA\nGAMMA") {
+		t.Fatalf("file not updated correctly: %s", string(data))
+	}
+}
+
+
+func TestRepeatedSearchThenReplaceBlockAddsWarningPrefix(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "replace-search-warning.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\ndelta\n")
+
+	_ = callRead(t, s, filePath, 0, 0)
+	_ = callRead(t, s, filePath, 1, 2)
+	_ = callGrepLiteral(t, s, "beta", filePath)
+	_ = callGrepLiteral(t, s, "gamma", filePath)
+
+	out := callReplaceBlock(t, s, filePath, "beta\ngamma", "BETA\nGAMMA")
+	var resp parsedOperationSuccess
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("expected JSON success envelope, got: %s\nerr: %v", out, err)
+	}
+	if resp.Status != "ok" || len(resp.Warnings) == 0 || resp.Warnings[0].Code != "REPEATED_SEARCH_RECOMMENDATION" {
+		t.Fatalf("expected repeated search warning on replace_block, got: %+v", resp)
+	}
+}
+
+func TestRepeatedSearchThenInsertBlockAddsWarningPrefix(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "insert-search-warning.txt")
+	writeTestFile(t, filePath, "one\ntwo\nthree\n")
+
+	_ = callRead(t, s, filePath, 0, 0)
+	_ = callRead(t, s, filePath, 1, 2)
+	_ = callGrepLiteral(t, s, "two", filePath)
+	_ = callGrepLiteral(t, s, "three", filePath)
+
+	out := callInsertBlock(t, s, filePath, "two", "inserted", "after")
+	var resp parsedOperationSuccess
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("expected JSON success envelope, got: %s\nerr: %v", out, err)
+	}
+	if resp.Status != "ok" || len(resp.Warnings) == 0 || resp.Warnings[0].Code != "REPEATED_SEARCH_RECOMMENDATION" {
+		t.Fatalf("expected repeated search warning on insert_block, got: %+v", resp)
+	}
+}
+
+func TestRepeatedSearchThenApplyPatchAddsWarningPrefix(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "patch-search-warning.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\n")
+
+	_ = callRead(t, s, filePath, 0, 0)
+	_ = callRead(t, s, filePath, 1, 2)
+	_ = callGrepLiteral(t, s, "beta", filePath)
+	_ = callGrepLiteral(t, s, "gamma", filePath)
+	patch := strings.Join([]string{
+		"--- a/patch-search-warning.txt",
+		"+++ b/patch-search-warning.txt",
+		"@@ -1,3 +1,3 @@",
+		" alpha",
+		"-beta",
+		"+BETA",
+		" gamma",
+	}, "\n")
+
+	out := callApplyPatch(t, s, filePath, patch)
+	var resp parsedOperationSuccess
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("expected JSON success envelope, got: %s\nerr: %v", out, err)
+	}
+	if resp.Status != "ok" || len(resp.Warnings) == 0 || resp.Warnings[0].Code != "REPEATED_SEARCH_RECOMMENDATION" {
+		t.Fatalf("expected repeated search warning on apply_patch, got: %+v", resp)
+	}
+}
+func TestRepeatedStaleReplaceBlockStrengthensMessage(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "replace-stale-repeat.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\n")
+	writeTestFile(t, filePath, "alpha\nBETA\ngamma\n")
+
+	firstOut := callReplaceBlock(t, s, filePath, "beta\ngamma", "BETA\nGAMMA")
+	var first editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(firstOut), &first); err != nil {
+		t.Fatalf("expected stale repair JSON on first replace retry, got: %s\nerr: %v", firstOut, err)
+	}
+	secondOut := callReplaceBlock(t, s, filePath, "beta\ngamma", "BETA\nGAMMA")
+	var second editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(secondOut), &second); err != nil {
+		t.Fatalf("expected stale repair JSON on second replace retry, got: %s\nerr: %v", secondOut, err)
+	}
+	if !strings.Contains(second.Message, "repeatedly") || !strings.Contains(second.Note, "already have fresh anchors") {
+		t.Fatalf("expected escalated stale message for replace_block, got: %+v", second)
+	}
+	_ = first
+}
+
+func TestRepeatedStaleApplyPatchStrengthensMessage(t *testing.T) {
+	cfg := newTestConfig(t)
+	s := New(cfg)
+	filePath := filepath.Join(cfg.Root, "patch-stale-repeat.txt")
+	writeTestFile(t, filePath, "alpha\nbeta\ngamma\n")
+	writeTestFile(t, filePath, "alpha\nBETA\ngamma\n")
+	patch := strings.Join([]string{
+		"--- a/patch-stale-repeat.txt",
+		"+++ b/patch-stale-repeat.txt",
+		"@@ -1,3 +1,3 @@",
+		" alpha",
+		"-beta",
+		"+replaced",
+		" gamma",
+	}, "\n")
+
+	firstOut := callApplyPatch(t, s, filePath, patch)
+	var first editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(firstOut), &first); err != nil {
+		t.Fatalf("expected stale repair JSON on first apply_patch retry, got: %s\nerr: %v", firstOut, err)
+	}
+	secondOut := callApplyPatch(t, s, filePath, patch)
+	var second editor.StaleRefRepairResult
+	if err := json.Unmarshal([]byte(secondOut), &second); err != nil {
+		t.Fatalf("expected stale repair JSON on second apply_patch retry, got: %s\nerr: %v", secondOut, err)
+	}
+	if !strings.Contains(second.Message, "repeatedly") || !strings.Contains(second.Note, "already have fresh anchors") {
+		t.Fatalf("expected escalated stale message for apply_patch, got: %+v", second)
+	}
+	_ = first
+}
+
 
 func TestRoundTrip_SelfCorrectMissingHashMessage(t *testing.T) {
 	cfg := newTestConfig(t)
