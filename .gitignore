@@ -3,3 +3,17 @@
 __pycache__/
 benchmark/repos/
 benchmark/results/
+
+# Build artifacts
+bin/
+*.exe
+
+# Test/coverage artifacts
+coverage.out
+coverage.html
+
+# Temp files from atomic writes
+*.lapp.tmp
+
+# Local environment (may contain secrets)
+.env
