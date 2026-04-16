@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -458,12 +459,24 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 
 	// Validate parent chain for symlinks before creating directories.
-	// This prevents MkdirAll from following a symlink inside root that
-	// points outside root, which would create orphan directories.
+	// Walk from root toward the target, resolving each existing component
+	// with Lstat to detect symlinks that escape the sandbox.
 	parentDir := filepath.Dir(cleaned)
-	if parentDir != s.cfg.Root {
-		if resolved, err := filepath.EvalSymlinks(parentDir); err == nil {
-			if !strings.HasPrefix(resolved, s.cfg.Root+string(os.PathSeparator)) {
+	rootSep := s.cfg.Root + string(os.PathSeparator)
+	cur := s.cfg.Root
+	rel, _ := filepath.Rel(s.cfg.Root, parentDir)
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if err != nil {
+			break // component doesn't exist yet; MkdirAll will create it under root
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(cur)
+			if err != nil || !strings.HasPrefix(resolved, rootSep) {
 				return mcp.NewToolResultError(fileio.ErrPathOutsideRoot), nil
 			}
 		}
@@ -785,6 +798,7 @@ type findBlockResult struct {
 }
 
 type patchHunk struct {
+	oldStart int // 1-indexed line from @@ header (0 if unavailable)
 	oldBlock []string
 	newBlock []string
 }
@@ -795,12 +809,13 @@ func parseUnifiedPatch(content string) ([]patchHunk, error) {
 	var oldBlock, newBlock []string
 	inHunk := false
 	seenFile := false
+	currentOldStart := 0
 
 	flush := func() {
 		if !inHunk {
 			return
 		}
-		hunks = append(hunks, patchHunk{oldBlock: append([]string(nil), oldBlock...), newBlock: append([]string(nil), newBlock...)})
+		hunks = append(hunks, patchHunk{oldStart: currentOldStart, oldBlock: append([]string(nil), oldBlock...), newBlock: append([]string(nil), newBlock...)})
 		oldBlock, newBlock = nil, nil
 		inHunk = false
 	}
@@ -816,6 +831,7 @@ func parseUnifiedPatch(content string) ([]patchHunk, error) {
 		case strings.HasPrefix(line, "@@ "):
 			flush()
 			inHunk = true
+			currentOldStart = parseHunkOldStart(line)
 		case line == `\ No newline at end of file`:
 			continue
 		case !inHunk:
@@ -1177,6 +1193,35 @@ func (s *Server) handleInsertBlock(ctx context.Context, req mcp.CallToolRequest)
 	return mcp.NewToolResultText(resp), nil
 }
 
+// parseHunkOldStart extracts the old file start line from a @@ header.
+// Returns 0 if the header cannot be parsed.
+func parseHunkOldStart(line string) int {
+	// Format: @@ -oldstart[,oldcount] +newstart[,newcount] @@
+	if len(line) < 4 || !strings.HasPrefix(line, "@@ ") {
+		return 0
+	}
+	rest := line[3:]
+	end := strings.Index(rest, " @@")
+	if end < 0 {
+		return 0
+	}
+	rest = rest[:end]
+	// Parse -oldstart part
+	if rest == "" || rest[0] != '-' {
+		return 0
+	}
+	rest = rest[1:]
+	comma := strings.Index(rest, ",")
+	if comma >= 0 {
+		rest = rest[:comma]
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 func (s *Server) handleApplyPatch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
@@ -1226,7 +1271,18 @@ func (s *Server) handleApplyPatch(ctx context.Context, req mcp.CallToolRequest) 
 			return mcp.NewToolResultError("patch target block not found"), nil
 		}
 		if len(ranges) > 1 {
-			return mcp.NewToolResultError(fmt.Sprintf("patch hunk matched %d ranges; narrow the context or apply smaller hunks", len(ranges))), nil
+			// Use @@ hunk coordinates to disambiguate when multiple matches exist.
+			if hunk.oldStart > 0 {
+				for _, r := range ranges {
+					if r.start == hunk.oldStart {
+						ranges = []blockRange{r}
+						break
+					}
+				}
+			}
+			if len(ranges) > 1 {
+				return mcp.NewToolResultError(fmt.Sprintf("patch hunk matched %d ranges; narrow the context or apply smaller hunks", len(ranges))), nil
+			}
 		}
 		r := ranges[0]
 		startRef := fmt.Sprintf("%d#%s", r.start, hashline.HashLine(fd.Lines[r.start-1], r.start))
