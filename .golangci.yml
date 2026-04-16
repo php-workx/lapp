@@ -57,10 +57,10 @@ linters:
 
   settings:
     gocognit:
-      min-complexity: 120  # TODO: lower to 30 once handleGrep and generateDiff are refactored
+      min-complexity: 120  # TODO(lap-v8i8): lower to 30 once handleGrep and generateDiff are refactored
 
     cyclop:
-      max-complexity: 60  # TODO: lower to 22 once handleGrep and handleInsertBlock are refactored
+      max-complexity: 60  # TODO(lap-v8i8): lower to 22 once handleGrep and handleInsertBlock are refactored
 
     goconst:
       min-len: 3
