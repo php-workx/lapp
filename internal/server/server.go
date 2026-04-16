@@ -9,27 +9,53 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/lapp-dev/lapp/internal/editor"
 	"github.com/lapp-dev/lapp/internal/fileio"
 	"github.com/lapp-dev/lapp/pkg/hashline"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
-)
+	)
 
 const version = "0.1.0"
 
 // Server wraps an MCPServer with project configuration.
 type Server struct {
-	cfg  *fileio.Config
-	mcpS *mcpserver.MCPServer
+	cfg   *fileio.Config
+	mcpS  *mcpserver.MCPServer
+	mu    sync.Mutex
+	guard map[string]*fileGuardState
+	}
+
+type fileGuardState struct {
+	recentFindBlocks int
+	recentSearchOps  int
+	lastAnchorSig    string
+	staleCount       int
+	}
+type operationWarning struct {
+	Status  string `json:"status"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
+
+type operationSuccess struct {
+	Status       string             `json:"status"`
+	Message      string             `json:"message"`
+	Path         string             `json:"path,omitempty"`
+	LinesChanged int                `json:"lines_changed,omitempty"`
+	Diff         string             `json:"diff,omitempty"`
+	Warnings     []operationWarning `json:"warnings,omitempty"`
+}
+
+
 
 // New creates and configures an MCP server. Emits a CLAUDE.md hint to stderr.
 func New(cfg *fileio.Config) *Server {
-	fmt.Fprintln(os.Stderr, "lapp: add to CLAUDE.md → Prefer lapp_read/lapp_edit/lapp_write/lapp_grep over built-in Read/Edit/Write/Grep")
+	fmt.Fprintln(os.Stderr, "lapp: add to CLAUDE.md → Prefer lapp_read/lapp_edit/lapp_write/lapp_grep over built-in Read/Edit/Write/Grep; for multiline helpers prefer lapp_insert_block, lapp_replace_block, and lapp_apply_patch when one file has multiple hunks")
 
-	s := &Server{cfg: cfg}
+	s := &Server{cfg: cfg, guard: map[string]*fileGuardState{}}
 	s.mcpS = mcpserver.NewMCPServer("lapp", version, mcpserver.WithToolCapabilities(false))
 	s.registerTools()
 	return s
@@ -40,6 +66,138 @@ func (s *Server) Start() error {
 	return mcpserver.ServeStdio(s.mcpS)
 }
 
+func (s *Server) stateFor(path string) *fileGuardState {
+	st := s.guard[path]
+	if st == nil {
+		st = &fileGuardState{}
+		s.guard[path] = st
+	}
+	return st
+}
+
+func anchorsSignature(changed []editor.StaleRefRepairLine) string {
+	parts := make([]string, 0, len(changed))
+	for _, ch := range changed {
+		parts = append(parts, ch.Anchor)
+	}
+	return strings.Join(parts, "|")
+}
+
+func (s *Server) applyStaleRetryGuard(path string, payload *editor.StaleRefRepairResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.stateFor(path)
+	sig := anchorsSignature(payload.Changed)
+	if sig != "" && sig == st.lastAnchorSig {
+		st.staleCount++
+	} else {
+		st.lastAnchorSig = sig
+		st.staleCount = 1
+	}
+	if st.staleCount >= 2 {
+		payload.Message = "This file returned stale_refs repeatedly for the same local region. Retry using the fresh anchors below instead of rereading."
+		payload.Note = "You already have fresh anchors for this region. Reuse them directly in your retry instead of running another broad read or grep."
+	}
+}
+
+func (s *Server) recordFindBlock(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.stateFor(path)
+	st.recentFindBlocks++
+	}
+
+func (s *Server) recordSearchOp(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.stateFor(path)
+	st.recentSearchOps++
+	}
+
+func (s *Server) consumeSearchWarning(path string) *operationWarning {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.stateFor(path)
+	warn := st.recentSearchOps >= 4
+	st.recentSearchOps = 0
+	if !warn {
+		return nil
+	}
+	return &operationWarning{
+		Status:  "warning",
+		Code:    "REPEATED_SEARCH_RECOMMENDATION",
+		Message: "You searched or reread this file repeatedly before editing. Prefer a more direct helper such as lapp_replace_block, lapp_insert_block, or lapp_apply_patch when applicable.",
+	}
+}
+
+func (s *Server) consumeMultilineWarning(path string, req *editor.EditRequest) *operationWarning {
+	hasRangeReplace := false
+	for _, e := range req.Edits {
+		if e.Type == editor.EditReplace && e.Start != "" && e.End != "" {
+			hasRangeReplace = true
+			break
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.stateFor(path)
+	warn := hasRangeReplace && st.recentFindBlocks >= 2
+	st.recentFindBlocks = 0
+	if !warn {
+		return nil
+	}
+	return &operationWarning{
+		Status:  "warning",
+		Code:    "MULTILINE_HELPER_RECOMMENDATION",
+		Message: "You used lapp_find_block plus lapp_edit repeatedly on the same file for multiline edits. Prefer lapp_replace_block for exact block replacements.",
+	}
+}
+
+func (s *Server) resetMultilineTracking(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.stateFor(path)
+	st.recentFindBlocks = 0
+}
+
+func marshalGuardedStalePayload(payload editor.StaleRefRepairResult, apply func(*editor.StaleRefRepairResult)) string {
+	if apply != nil {
+		apply(&payload)
+	}
+	jsonBytes, _ := json.Marshal(payload)
+	return string(jsonBytes)
+}
+
+func marshalSuccessResponse(message string, path string, result *editor.EditResult, warnings ...*operationWarning) string {
+	resp := operationSuccess{Status: "ok", Message: message, Path: path}
+	if result != nil {
+		resp.LinesChanged = result.LinesChanged
+		resp.Diff = result.Diff
+	}
+	for _, w := range warnings {
+		if w != nil {
+			resp.Warnings = append(resp.Warnings, *w)
+		}
+	}
+	jsonBytes, _ := json.Marshal(resp)
+	return string(jsonBytes)
+}
+
+
+
+func (s *Server) toolEnabled(name string) bool {
+	if s.cfg == nil || len(s.cfg.EnabledTools) == 0 {
+		return true
+	}
+	for _, allowed := range s.cfg.EnabledTools {
+		if strings.TrimSpace(allowed) == name {
+			return true
+		}
+	}
+	return false
+}
+
+
 func (s *Server) registerTools() {
 	// lapp_read
 	readTool := mcp.NewTool("lapp_read",
@@ -48,8 +206,9 @@ func (s *Server) registerTools() {
 		mcp.WithNumber("offset", mcp.Description("Start line, 1-indexed (default: 1)")),
 		mcp.WithNumber("limit", mcp.Description("Max lines to return (default: server default, typically 2000)")),
 	)
-	s.mcpS.AddTool(readTool, s.handleRead)
-
+	if s.toolEnabled("lapp_read") {
+		s.mcpS.AddTool(readTool, s.handleRead)
+	}
 	// lapp_edit — raw schema because mcp-go builder can't express nested enum within items.
 	editsRawSchema := `{
 		"type": "object",
@@ -77,7 +236,9 @@ func (s *Server) registerTools() {
 		`Edit a file using LINE#HASH references from lapp_read. Addressing: for single-line operations use anchor; for range operations use start and end (never anchor and start/end together). Operations: replace (single line or range), insert_after (single line only), insert_before (single line only), delete (single line or range). All edits are validated atomically — if any reference is stale, nothing is written and updated references are provided. Read the file with lapp_read first. Special anchors: "0:" inserts at beginning, "EOF:" appends at end. Maximum 100 edits per call.`,
 		json.RawMessage(editsRawSchema),
 	)
-	s.mcpS.AddTool(editTool, s.handleEdit)
+	if s.toolEnabled("lapp_edit") {
+		s.mcpS.AddTool(editTool, s.handleEdit)
+	}
 
 	// lapp_write
 	writeTool := mcp.NewTool("lapp_write",
@@ -85,7 +246,9 @@ func (s *Server) registerTools() {
 		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the new file")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("Complete file content")),
 	)
-	s.mcpS.AddTool(writeTool, s.handleWrite)
+	if s.toolEnabled("lapp_write") {
+		s.mcpS.AddTool(writeTool, s.handleWrite)
+	}
 
 	// lapp_grep
 	grepTool := mcp.NewTool("lapp_grep",
@@ -96,7 +259,9 @@ func (s *Server) registerTools() {
 		mcp.WithBoolean("literal", mcp.Description("If true, treat pattern as a fixed string (no regex interpretation). Use when the search term contains code or regex metacharacters")),
 		mcp.WithString("format", mcp.Description("Output format: text (default) or structured")),
 	)
-	s.mcpS.AddTool(grepTool, s.handleGrep)
+	if s.toolEnabled("lapp_grep") {
+		s.mcpS.AddTool(grepTool, s.handleGrep)
+	}
 
 	// lapp_find_block
 	findBlockTool := mcp.NewTool("lapp_find_block",
@@ -106,7 +271,9 @@ func (s *Server) registerTools() {
 		mcp.WithBoolean("literal", mcp.Description("If true, treat content as a literal block (default true). Regex block search is not currently supported.")),
 		mcp.WithBoolean("normalize_whitespace", mcp.Description("If false, require exact indentation match. Default true ignores shared leading indentation differences when matching the block.")),
 	)
-	s.mcpS.AddTool(findBlockTool, s.handleFindBlock)
+	if s.toolEnabled("lapp_find_block") {
+		s.mcpS.AddTool(findBlockTool, s.handleFindBlock)
+	}
 
 	// lapp_replace_block
 	replaceBlockTool := mcp.NewTool("lapp_replace_block",
@@ -116,7 +283,35 @@ func (s *Server) registerTools() {
 		mcp.WithString("new_content", mcp.Required(), mcp.Description("Replacement block content.")),
 		mcp.WithBoolean("normalize_whitespace", mcp.Description("If false, require exact indentation match. Default true ignores shared leading indentation differences when matching the old block.")),
 	)
-	s.mcpS.AddTool(replaceBlockTool, s.handleReplaceBlock)
+	if s.toolEnabled("lapp_replace_block") {
+		s.mcpS.AddTool(replaceBlockTool, s.handleReplaceBlock)
+	}
+
+	// lapp_insert_block
+	insertBlockTool := mcp.NewTool("lapp_insert_block",
+		mcp.WithDescription(`Insert a multi-line block before or after an exact anchor block. Provide anchor_content and new_content; lapp finds the anchor internally, preserves the anchor block's base indentation in the inserted block, and applies one insert edit. Use this for insertion-only multiline changes where manual range edits are error-prone.`),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the file to modify")),
+		mcp.WithString("anchor_content", mcp.Required(), mcp.Description("Exact anchor block to insert before or after.")),
+		mcp.WithString("new_content", mcp.Required(), mcp.Description("Block content to insert.")),
+		mcp.WithString("position", mcp.Required(), mcp.Description("Insert position relative to the anchor: before or after.")),
+		mcp.WithBoolean("normalize_whitespace", mcp.Description("If false, require exact indentation match. Default true ignores shared leading indentation differences when matching the anchor block and rebases inserted indentation to the anchor block.")),
+	)
+	if s.toolEnabled("lapp_insert_block") {
+		s.mcpS.AddTool(insertBlockTool, s.handleInsertBlock)
+	}
+
+	// lapp_apply_patch
+	applyPatchTool := mcp.NewTool("lapp_apply_patch",
+		mcp.WithDescription(`Apply a single-file unified diff atomically. Provide path and patch; lapp parses the hunks, matches each old block with surrounding context, and applies all replacements in one batch. Use this for repeated edits in one file when manual sequencing is error-prone.`),
+		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the file to modify")),
+		mcp.WithString("patch", mcp.Required(), mcp.Description("Unified diff for one file (---/+++ headers plus one or more @@ hunks).")),
+		mcp.WithBoolean("normalize_whitespace", mcp.Description("If false, require exact indentation match. Default true ignores shared leading indentation differences when matching hunks and rebases replacement indentation to the matched block.")),
+	)
+	if s.toolEnabled("lapp_apply_patch") {
+		s.mcpS.AddTool(applyPatchTool, s.handleApplyPatch)
+	}
+
+
 }
 
 
@@ -167,7 +362,6 @@ func (s *Server) handleRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	if end > totalLines {
 		end = totalLines
 	}
-
 	var sb strings.Builder
 	for i := start; i < end; i++ {
 		sb.WriteString(hashline.FormatLine(lines[i], i+1))
@@ -179,6 +373,7 @@ func (s *Server) handleRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			offset, offset+limit-1, totalLines, offset+limit))
 	}
 
+	s.recordSearchOp(canonical)
 	return mcp.NewToolResultText(sb.String()), nil
 }
 
@@ -230,6 +425,10 @@ func (s *Server) handleEdit(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		return mcp.NewToolResultText(string(jsonBytes)), nil
 	}
 	if errCode == editor.ErrStaleRefs {
+		var payload editor.StaleRefRepairResult
+		if err := json.Unmarshal([]byte(errDetail), &payload); err == nil && payload.Status == "stale_refs" {
+			return mcp.NewToolResultText(marshalGuardedStalePayload(payload, func(p *editor.StaleRefRepairResult) { s.applyStaleRetryGuard(canonical, p) })), nil
+		}
 		return mcp.NewToolResultText(errDetail), nil
 	}
 
@@ -244,8 +443,9 @@ func (s *Server) handleEdit(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	if wc := fileio.WriteFile(fd, newLines); wc != "" {
 		return mcp.NewToolResultError(wc), nil
 	}
-
-	resp := fmt.Sprintf("OK: %d line(s) changed\n%s", result.LinesChanged, result.Diff)
+	searchWarn := s.consumeSearchWarning(canonical)
+	multilineWarn := s.consumeMultilineWarning(canonical, editReq)
+	resp := marshalSuccessResponse(fmt.Sprintf("OK: %d line(s) changed", result.LinesChanged), canonical, result, searchWarn, multilineWarn)
 	return mcp.NewToolResultText(resp), nil
 }
 
@@ -279,9 +479,9 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		return mcp.NewToolResultError(editor.ErrFileExists), nil
 	}
 
-
-	// Atomic write: temp file (0600) → chmod 0644 → rename. §9.1.
-	// New files created by lapp_write default to 0644 (conventional source file permissions).
+	// Atomic write: temp file (0600) → chmod 0644 → hard-link (no-replace) → remove tmp. §9.1.
+	// os.Link fails with EEXIST if the destination was created concurrently,
+	// preventing the race between Stat and rename.
 	tmpPath := fmt.Sprintf("%s.%d.%s.lapp.tmp", canonical, os.Getpid(), fileio.RandomHex(8))
 	f, createErr := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if createErr != nil {
@@ -302,21 +502,28 @@ func (s *Server) handleWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		os.Remove(tmpPath)
 		return mcp.NewToolResultError("cannot write file: " + closeErr.Error()), nil
 	}
-	// Restore conventional source file permissions before rename makes it visible.
+	// Restore conventional source file permissions before making it visible.
 	if chmodErr := os.Chmod(tmpPath, 0644); chmodErr != nil {
 		os.Remove(tmpPath)
 		return mcp.NewToolResultError("cannot set file permissions: " + chmodErr.Error()), nil
 	}
-	if errCode := fileio.RenameAtomic(tmpPath, canonical); errCode != "" {
+	// os.Link is atomic on POSIX: fails with EEXIST if destination exists.
+	if linkErr := os.Link(tmpPath, canonical); linkErr != nil {
 		os.Remove(tmpPath)
-		return mcp.NewToolResultError(errCode), nil
+		if os.IsExist(linkErr) {
+			return mcp.NewToolResultError(editor.ErrFileExists), nil
+		}
+		return mcp.NewToolResultError("cannot create file: " + linkErr.Error()), nil
 	}
+	// Link succeeded; remove the temp path (the inode now has two links).
+	os.Remove(tmpPath)
 
 	lines := strings.Count(content, "\n")
 	if len(content) > 0 && content[len(content)-1] != '\n' {
 		lines++
 	}
-	return mcp.NewToolResultText(fmt.Sprintf("OK: created %s (%d lines)", path, lines)), nil
+	resp := marshalSuccessResponse(fmt.Sprintf("OK: created %s (%d lines)", path, lines), canonical, nil)
+	return mcp.NewToolResultText(resp), nil
 }
 
 var literalRegexEscapeReplacer = strings.NewReplacer(
@@ -414,6 +621,7 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	}
 
 	const maxGrepFiles = 100
+	const maxStructuredMatches = 500
 	maxOutputLines := s.cfg.DefaultLimit
 	if maxOutputLines <= 0 {
 		maxOutputLines = 2000
@@ -428,12 +636,12 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 
 	walkErr := filepath.WalkDir(searchRoot, func(filePath string, d os.DirEntry, e error) error {
 		if e != nil {
-			return e
+			return nil // ignore walk-level errors; continue traversal
 		}
 		if d.IsDir() {
 			return nil
 		}
-		if filesMatched >= maxGrepFiles || (format == "text" && outputLines >= maxOutputLines) {
+		if filesMatched >= maxGrepFiles || (format == "text" && outputLines >= maxOutputLines) || (format == "structured" && len(structuredMatches) >= maxStructuredMatches) {
 			return errCapReached
 		}
 
@@ -489,6 +697,7 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 					ContextAfter: after,
 				})
 			}
+			s.recordSearchOp(canonical)
 			return nil
 		}
 
@@ -529,14 +738,17 @@ func (s *Server) handleGrep(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 			outputLines++
 			prev = k
 		}
+		s.recordSearchOp(canonical)
 		return nil
 	})
 
 	if walkErr != nil && walkErr != errCapReached {
+		// Unreachable: walk callback never returns non-nil (walk errors
+		// are swallowed, only errCapReached escapes). Kept as safety net.
 		return mcp.NewToolResultError("grep error: " + walkErr.Error()), nil
 	}
 	if format == "structured" {
-		jsonBytes, _ := json.Marshal(grepStructuredResult{Matches: structuredMatches})
+		jsonBytes, _ := json.Marshal(grepStructuredResult{Matches: structuredMatches, Truncated: walkErr == errCapReached})
 		return mcp.NewToolResultText(string(jsonBytes)), nil
 	}
 	if walkErr == errCapReached {
@@ -562,6 +774,61 @@ type findBlockResult struct {
 	Matches []blockMatch `json:"matches"`
 }
 
+type patchHunk struct {
+	oldBlock []string
+	newBlock []string
+}
+
+func parseUnifiedPatch(content string) ([]patchHunk, error) {
+	content = editor.NormalizeNewlines(content)
+	var hunks []patchHunk
+	var oldBlock, newBlock []string
+	inHunk := false
+	seenFile := false
+
+	flush := func() {
+		if !inHunk {
+			return
+		}
+		hunks = append(hunks, patchHunk{oldBlock: append([]string(nil), oldBlock...), newBlock: append([]string(nil), newBlock...)})
+		oldBlock, newBlock = nil, nil
+		inHunk = false
+	}
+
+	for _, line := range strings.Split(content, "\n") {
+		switch {
+		case strings.HasPrefix(line, "--- "):
+			if seenFile {
+				return nil, fmt.Errorf("patch must target exactly one file")
+			}
+		case strings.HasPrefix(line, "+++ "):
+			seenFile = true
+		case strings.HasPrefix(line, "@@ "):
+			flush()
+			inHunk = true
+		case line == `\ No newline at end of file`:
+			continue
+		case !inHunk:
+			continue
+		case strings.HasPrefix(line, " "):
+			oldBlock = append(oldBlock, line[1:])
+			newBlock = append(newBlock, line[1:])
+		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+			oldBlock = append(oldBlock, line[1:])
+		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+			newBlock = append(newBlock, line[1:])
+		default:
+			return nil, fmt.Errorf("unsupported patch line: %q", line)
+		}
+	}
+	flush()
+	if len(hunks) == 0 {
+		return nil, fmt.Errorf("patch must contain at least one @@ hunk")
+	}
+	return hunks, nil
+}
+
+
 type grepStructuredMatch struct {
 	Path          string   `json:"path"`
 	Anchor        string   `json:"anchor"`
@@ -572,7 +839,8 @@ type grepStructuredMatch struct {
 }
 
 type grepStructuredResult struct {
-	Matches []grepStructuredMatch `json:"matches"`
+	Matches   []grepStructuredMatch `json:"matches"`
+	Truncated bool                  `json:"truncated,omitempty"`
 }
 
 func splitSearchContent(content string) []string {
@@ -720,6 +988,29 @@ type blockRange struct {
 	end   int
 }
 
+func buildBlockStaleRepairPayload(lines []string, best blockRange, mismatchLines []int, message string) editor.StaleRefRepairResult {
+	changed := make([]editor.StaleRefRepairLine, 0, len(mismatchLines))
+	for _, lineNum := range mismatchLines {
+		if lineNum < 1 || lineNum > len(lines) {
+			continue
+		}
+		line := lines[lineNum-1]
+		changed = append(changed, editor.StaleRefRepairLine{
+			Anchor: fmt.Sprintf("%d#%s", lineNum, hashline.HashLine(line, lineNum)),
+			LineNumber: lineNum,
+			Line: line,
+		})
+	}
+	return editor.StaleRefRepairResult{
+		Status: "stale_refs",
+		ErrorCode: editor.ErrHashMismatch,
+		Message: message,
+		Count: len(changed),
+		Changed: changed,
+		Note: fmt.Sprintf("Closest matching region is lines %d-%d. Use the returned anchors to re-read or rebuild the edit.", best.start, best.end),
+	}
+}
+
 func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
@@ -774,9 +1065,198 @@ func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (
 			Preview: preview,
 		})
 	}
+	s.recordFindBlock(canonical)
+	s.recordSearchOp(canonical)
 	jsonBytes, _ := json.Marshal(findBlockResult{Matches: matches})
 	return mcp.NewToolResultText(string(jsonBytes)), nil
 }
+
+func (s *Server) handleInsertBlock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	anchorContent, err := req.RequireString("anchor_content")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	newContent, err := req.RequireString("new_content")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	position, err := req.RequireString("position")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if position != "before" && position != "after" {
+		return mcp.NewToolResultError("position must be 'before' or 'after'"), nil
+	}
+	args := req.GetArguments()
+	normalizeWhitespace := true
+	if v, ok := args["normalize_whitespace"]; ok {
+		if b, ok2 := v.(bool); ok2 {
+			normalizeWhitespace = b
+		}
+	}
+
+	canonical, errCode := fileio.CheckPath(path, s.cfg, true)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	unlock, errCode := fileio.AcquireLock(canonical)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	defer unlock()
+	fd, errCode := fileio.ReadFile(canonical, s.cfg)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	needle := splitSearchContent(anchorContent)
+	if len(needle) == 0 {
+		return mcp.NewToolResultError("anchor_content parameter required"), nil
+	}
+	ranges := findBlockRanges(fd.Lines, needle, normalizeWhitespace)
+	if len(ranges) == 0 {
+		if best, mismatchLines, ok := bestSimilarBlockRange(fd.Lines, needle, normalizeWhitespace); ok {
+			payload := buildBlockStaleRepairPayload(fd.Lines, best, mismatchLines, "Anchor block changed since last read. Retry with the updated refs below.")
+			return mcp.NewToolResultText(marshalGuardedStalePayload(payload, func(p *editor.StaleRefRepairResult) { s.applyStaleRetryGuard(canonical, p) })), nil
+		}
+		return mcp.NewToolResultError("anchor block not found"), nil
+	}
+	if len(ranges) > 1 {
+		return mcp.NewToolResultError(fmt.Sprintf("anchor block matched %d ranges; narrow the block or use lapp_find_block first", len(ranges))), nil
+	}
+	r := ranges[0]
+	anchorLine := r.start
+	if position == "after" {
+		anchorLine = r.end
+	}
+	anchorRef := fmt.Sprintf("%d#%s", anchorLine, hashline.HashLine(fd.Lines[anchorLine-1], anchorLine))
+	adjustedNewContent := newContent
+	if normalizeWhitespace {
+		anchorBlock := fd.Lines[r.start-1 : r.end]
+		newBlock := splitSearchContent(newContent)
+		adjustedNewContent = strings.Join(rebaseBlockIndent(anchorBlock, newBlock), "\n")
+	}
+	editType := editor.EditInsertAfter
+	if position == "before" {
+		editType = editor.EditInsertBefore
+	}
+	edits := []editor.Edit{{Type: editType, Anchor: anchorRef, Content: &adjustedNewContent}}
+	editReq := &editor.EditRequest{Path: path, Edits: edits}
+	newLines, result, errCode, errDetail := editor.ApplyEdits(fd, editReq)
+	if errCode == editor.ErrStaleRefs {
+		var payload editor.StaleRefRepairResult
+		if err := json.Unmarshal([]byte(errDetail), &payload); err == nil && payload.Status == "stale_refs" {
+			return mcp.NewToolResultText(marshalGuardedStalePayload(payload, func(p *editor.StaleRefRepairResult) { s.applyStaleRetryGuard(canonical, p) })), nil
+		}
+		return mcp.NewToolResultText(errDetail), nil
+	}
+	if errCode != "" {
+		msg := errCode
+		if errDetail != "" {
+			msg = errCode + ": " + errDetail
+		}
+		return mcp.NewToolResultError(msg), nil
+	}
+	s.resetMultilineTracking(canonical)
+	if wc := fileio.WriteFile(fd, newLines); wc != "" {
+		return mcp.NewToolResultError(wc), nil
+	}
+	searchWarn := s.consumeSearchWarning(canonical)
+	resp := marshalSuccessResponse(fmt.Sprintf("OK: %d line(s) changed", result.LinesChanged), canonical, result, searchWarn)
+	return mcp.NewToolResultText(resp), nil
+}
+
+
+func (s *Server) handleApplyPatch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	patch, err := req.RequireString("patch")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	args := req.GetArguments()
+	normalizeWhitespace := true
+	if v, ok := args["normalize_whitespace"]; ok {
+		if b, ok2 := v.(bool); ok2 {
+			normalizeWhitespace = b
+		}
+	}
+
+	hunks, parseErr := parseUnifiedPatch(patch)
+	if parseErr != nil {
+		return mcp.NewToolResultError(parseErr.Error()), nil
+	}
+	canonical, errCode := fileio.CheckPath(path, s.cfg, true)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	unlock, errCode := fileio.AcquireLock(canonical)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+	defer unlock()
+	fd, errCode := fileio.ReadFile(canonical, s.cfg)
+	if errCode != "" {
+		return mcp.NewToolResultError(errCode), nil
+	}
+
+	edits := make([]editor.Edit, 0, len(hunks))
+	for _, hunk := range hunks {
+		if len(hunk.oldBlock) == 0 {
+			return mcp.NewToolResultError("pure insertion hunks without surrounding context are not supported; include context lines in the patch"), nil
+		}
+		ranges := findBlockRanges(fd.Lines, hunk.oldBlock, normalizeWhitespace)
+		if len(ranges) == 0 {
+			if best, mismatchLines, ok := bestSimilarBlockRange(fd.Lines, hunk.oldBlock, normalizeWhitespace); ok {
+				payload := buildBlockStaleRepairPayload(fd.Lines, best, mismatchLines, "Patch target changed since last read. Retry with the updated refs below.")
+				return mcp.NewToolResultText(marshalGuardedStalePayload(payload, func(p *editor.StaleRefRepairResult) { s.applyStaleRetryGuard(canonical, p) })), nil
+			}
+			return mcp.NewToolResultError("patch target block not found"), nil
+		}
+		if len(ranges) > 1 {
+			return mcp.NewToolResultError(fmt.Sprintf("patch hunk matched %d ranges; narrow the context or apply smaller hunks", len(ranges))), nil
+		}
+		r := ranges[0]
+		startRef := fmt.Sprintf("%d#%s", r.start, hashline.HashLine(fd.Lines[r.start-1], r.start))
+		endRef := fmt.Sprintf("%d#%s", r.end, hashline.HashLine(fd.Lines[r.end-1], r.end))
+		adjustedNewContent := strings.Join(hunk.newBlock, "\n")
+		if normalizeWhitespace {
+			oldBlock := fd.Lines[r.start-1 : r.end]
+			adjustedNewContent = strings.Join(rebaseBlockIndent(oldBlock, hunk.newBlock), "\n")
+		}
+		edits = append(edits, editor.Edit{Type: editor.EditReplace, Start: startRef, End: endRef, Content: &adjustedNewContent})
+	}
+
+	editReq := &editor.EditRequest{Path: path, Edits: edits}
+	newLines, result, errCode, errDetail := editor.ApplyEdits(fd, editReq)
+	if errCode == editor.ErrStaleRefs {
+		var payload editor.StaleRefRepairResult
+		if err := json.Unmarshal([]byte(errDetail), &payload); err == nil && payload.Status == "stale_refs" {
+			return mcp.NewToolResultText(marshalGuardedStalePayload(payload, func(p *editor.StaleRefRepairResult) { s.applyStaleRetryGuard(canonical, p) })), nil
+		}
+		return mcp.NewToolResultText(errDetail), nil
+	}
+	if errCode != "" {
+		msg := errCode
+		if errDetail != "" {
+			msg = errCode + ": " + errDetail
+		}
+		return mcp.NewToolResultError(msg), nil
+	}
+	s.resetMultilineTracking(canonical)
+	if wc := fileio.WriteFile(fd, newLines); wc != "" {
+		return mcp.NewToolResultError(wc), nil
+	}
+	searchWarn := s.consumeSearchWarning(canonical)
+	resp := marshalSuccessResponse(fmt.Sprintf("OK: %d line(s) changed", result.LinesChanged), canonical, result, searchWarn)
+	return mcp.NewToolResultText(resp), nil
+}
+
 
 func (s *Server) handleReplaceBlock(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
@@ -819,28 +1299,8 @@ func (s *Server) handleReplaceBlock(ctx context.Context, req mcp.CallToolRequest
 	ranges := findBlockRanges(fd.Lines, needle, normalizeWhitespace)
 	if len(ranges) == 0 {
 		if best, mismatchLines, ok := bestSimilarBlockRange(fd.Lines, needle, normalizeWhitespace); ok {
-			changed := make([]editor.StaleRefRepairLine, 0, len(mismatchLines))
-			for _, lineNum := range mismatchLines {
-				if lineNum < 1 || lineNum > len(fd.Lines) {
-					continue
-				}
-				line := fd.Lines[lineNum-1]
-				changed = append(changed, editor.StaleRefRepairLine{
-					Anchor: fmt.Sprintf("%d#%s", lineNum, hashline.HashLine(line, lineNum)),
-					LineNumber: lineNum,
-					Line: line,
-				})
-			}
-			payload := editor.StaleRefRepairResult{
-				Status: "stale_refs",
-				ErrorCode: editor.ErrHashMismatch,
-				Message: "Target block changed since last read. Retry with the updated refs below.",
-				Count: len(changed),
-				Changed: changed,
-				Note: fmt.Sprintf("Closest matching region is lines %d-%d. Use the returned anchors to re-read or rebuild the replacement block.", best.start, best.end),
-			}
-			jsonBytes, _ := json.Marshal(payload)
-			return mcp.NewToolResultText(string(jsonBytes)), nil
+			payload := buildBlockStaleRepairPayload(fd.Lines, best, mismatchLines, "Target block changed since last read. Retry with the updated refs below.")
+			return mcp.NewToolResultText(marshalGuardedStalePayload(payload, func(p *editor.StaleRefRepairResult) { s.applyStaleRetryGuard(canonical, p) })), nil
 		}
 		return mcp.NewToolResultError("old block not found"), nil
 	}
@@ -860,6 +1320,10 @@ func (s *Server) handleReplaceBlock(ctx context.Context, req mcp.CallToolRequest
 	editReq := &editor.EditRequest{Path: path, Edits: edits}
 	newLines, result, errCode, errDetail := editor.ApplyEdits(fd, editReq)
 	if errCode == editor.ErrStaleRefs {
+		var payload editor.StaleRefRepairResult
+		if err := json.Unmarshal([]byte(errDetail), &payload); err == nil && payload.Status == "stale_refs" {
+			return mcp.NewToolResultText(marshalGuardedStalePayload(payload, func(p *editor.StaleRefRepairResult) { s.applyStaleRetryGuard(canonical, p) })), nil
+		}
 		return mcp.NewToolResultText(errDetail), nil
 	}
 	if errCode != "" {
@@ -869,9 +1333,11 @@ func (s *Server) handleReplaceBlock(ctx context.Context, req mcp.CallToolRequest
 		}
 		return mcp.NewToolResultError(msg), nil
 	}
+	s.resetMultilineTracking(canonical)
 	if wc := fileio.WriteFile(fd, newLines); wc != "" {
 		return mcp.NewToolResultError(wc), nil
 	}
-	resp := fmt.Sprintf("OK: %d line(s) changed\n%s", result.LinesChanged, result.Diff)
+	searchWarn := s.consumeSearchWarning(canonical)
+	resp := marshalSuccessResponse(fmt.Sprintf("OK: %d line(s) changed", result.LinesChanged), canonical, result, searchWarn)
 	return mcp.NewToolResultText(resp), nil
 }
