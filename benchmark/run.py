@@ -33,10 +33,12 @@ from pathlib import Path
 from textwrap import dedent
 
 BENCHMARK_DIR = Path(__file__).parent
+PROJECT_DIR   = BENCHMARK_DIR.parent
 FILES_DIR     = BENCHMARK_DIR / "files"
 RESULTS_BASE  = BENCHMARK_DIR / "results"
 INSTANCES_FILE = BENCHMARK_DIR / "instances.json"
 SUITES_FILE    = BENCHMARK_DIR / "v1_suites.json"
+INSTRUCTIONS_FILE = PROJECT_DIR / "instructions" / "lapp-tools.md"
 
 TIMEOUT   = 120   # seconds per config; >2m for a single-file targeted edit is benchmark-fail
 MAX_TURNS = 20    # upper bound; keeps loops visible while allowing a few retries
@@ -59,10 +61,10 @@ V2_STRATEGIES = {
 
 # Claude tool names (--allowedTools values)
 TOOLS_A = "Read,Edit,Write"
-TOOLS_B = "lapp_read,lapp_edit,lapp_write,lapp_grep"
+TOOLS_B = "lapp_read,lapp_edit,lapp_write,lapp_grep,lapp_insert_block,lapp_apply_patch"
 TOOLS_B_REPLACE_BLOCK = (
-    "lapp_read,lapp_edit,lapp_write,lapp_grep,lapp_replace_block,lapp_find_block"
-)
+    "lapp_read,lapp_edit,lapp_write,lapp_grep,lapp_insert_block,lapp_apply_patch,lapp_replace_block,lapp_find_block"
+ )
 
 # ---- Claude prompts ----
 PROMPT_A = dedent("""\
@@ -77,11 +79,9 @@ PROMPT_A = dedent("""\
 """)
 
 PROMPT_B = dedent("""\
-    Apply the following change to the file. Read the file first to locate the
-    exact content, make the replacement, save it.
+    Apply the following change to the file.
     {strategy_hint}
-    If a change spans multiple lines, prefer lapp_replace_block with the exact
-    old block and new block. Only fall back to find_block + lapp_edit if needed.
+    If a full unified diff is provided below for one file, call lapp_apply_patch immediately before doing any manual grep/read/edit work.
     If lapp returns a stale_refs payload, retry using the returned local anchors
     instead of rereading the whole file.
     No shell commands. Do not explain your steps.
@@ -104,12 +104,9 @@ PROMPT_A_OC = dedent("""\
 """)
 
 PROMPT_B_OC = dedent("""\
-    Apply the following change to the file. Read the file first to locate the
-    exact content, make the replacement, save it.
+    Apply the following change to the file.
     {strategy_hint}
-    If a change spans multiple lines, prefer lapp_lapp_replace_block with the
-    exact old block and new block. Only fall back to lapp_lapp_find_block +
-    lapp_lapp_edit if needed.
+    If a full unified diff is provided below for one file, call lapp_lapp_apply_patch immediately before doing any manual grep/read/edit work.
     If lapp returns a stale_refs payload, retry using the returned local anchors
     instead of rereading the whole file.
     No shell commands. Do not explain your steps.
@@ -152,18 +149,28 @@ def capture_diff(work_dir: Path, instance_id: str) -> str:
     """Return a unified diff of every changed file in work_dir."""
     src = FILES_DIR / instance_id
     parts = []
+
+    # Build union of relative paths from both source and work dirs.
+    rels = set()
     for orig in src.rglob("*"):
         if orig.name.startswith("_") or orig.is_dir():
             continue
-        rel = orig.relative_to(src)
-        current = work_dir / rel
-        if not current.exists():
+        rels.add(orig.relative_to(src))
+    for cur in work_dir.rglob("*"):
+        if cur.is_dir():
             continue
+        rels.add(cur.relative_to(work_dir))
+
+    for rel in sorted(rels):
+        orig = src / rel
+        current = work_dir / rel
+        a_path = str(orig) if orig.exists() else "/dev/null"
+        b_path = str(current) if current.exists() else "/dev/null"
         result = subprocess.run(
             ["diff", "-u",
              "--label", f"a/{rel}",
              "--label", f"b/{rel}",
-             str(orig), str(current)],
+             a_path, b_path],
             capture_output=True, text=True,
         )
         if result.stdout:
@@ -232,7 +239,8 @@ def build_prompt(
     work_dir: Path,
     instance_id: str,
     strategy_hint: str = "",
-) -> str:
+    strategy: str | None = None,
+ ) -> str:
     diff_path = FILES_DIR / instance_id / "_patch.diff"
     diff = diff_path.read_text() if diff_path.exists() else ""
     changes = parse_patch_change(diff)
@@ -255,10 +263,21 @@ def build_prompt(
         if not old_lines or not new_lines:
             old_block = _indent(ch['old']) if ch['old'] else '    (no old lines in this hunk)'
             new_block = _indent(ch['new']) if ch['new'] else '    (delete the matched range)'
+            insert_tool_name = "lapp_lapp_insert_block" if AGENT == "opencode" else "lapp_insert_block"
+            if not old_lines and new_lines:
+                hunk_note = "This is an INSERTION-ONLY hunk."
+                if strategy != "native-edit":
+                    hunk_note += (
+                        f" Find the exact anchor line or block immediately before this insertion, then use {insert_tool_name} instead of piecing together multiple edits."
+                    )
+            else:
+                hunk_note = "This is a DELETION-ONLY hunk."
+                if strategy != "native-edit":
+                    hunk_note += " Locate the exact stale block and apply one delete edit; do not force replace_block."
             blocks.append(
                 f"{label}\n"
                 f"  File: {full_path}\n"
-                f"  This hunk includes insertion-only or deletion-only lines.\n"
+                f"  {hunk_note}\n"
                 f"  Old block (if any):\n{old_block}\n"
                 f"  New block (if any):\n{new_block}"
             )
@@ -280,9 +299,17 @@ def build_prompt(
                 f"  Replace with:\n{_indent(ch['new'])}"
             )
 
+    if strategy and strategy != "native-edit" and len(changes) > 1:
+        rendered = (
+            "This prompt contains multiple changes in one file. FIRST ACTION: use lapp_apply_patch with the unified diff below. "
+            "Only if apply_patch fails may you use the fallback per-hunk instructions after it.\n\n"
+            "Unified diff for this file:\n\n" + diff + "\n\nFallback per-hunk instructions (only if apply_patch fails):\n\n" + "\n\n".join(blocks)
+        )
+    else:
+        rendered = "\n\n".join(blocks)
     return template.format(
         filepath=str(work_dir),
-        changes="\n\n".join(blocks),
+        changes=rendered,
         strategy_hint=strategy_hint,
     )
 
@@ -296,30 +323,40 @@ def strategy_hint(strategy: str, agent: str) -> str:
     if agent == "opencode":
         grep_tool = "lapp_lapp_grep"
         edit_tool = "lapp_lapp_edit"
+        insert_tool = "lapp_lapp_insert_block"
+        apply_tool = "lapp_lapp_apply_patch"
         replace_tool = "lapp_lapp_replace_block"
         find_tool = "lapp_lapp_find_block"
+        read_tool = "lapp_lapp_read"
     else:
         grep_tool = "lapp_grep"
         edit_tool = "lapp_edit"
+        insert_tool = "lapp_insert_block"
+        apply_tool = "lapp_apply_patch"
         replace_tool = "lapp_replace_block"
         find_tool = "lapp_find_block"
+        read_tool = "lapp_read"
 
     if strategy == "lapp-text-grep":
         return (
-            f"Preferred: {grep_tool} with literal=true to find the line → {edit_tool}."
+            f"Use only {grep_tool}, {edit_tool}, {read_tool}, {insert_tool}, and {apply_tool}. "
+            f"Do not use {replace_tool} or {find_tool}. If the prompt contains multiple changes in the same file, your FIRST attempt must be {apply_tool} with the full diff from the prompt. "
+            f"Only if {apply_tool} fails should you fall back to manual {grep_tool}/{read_tool}/{edit_tool} steps. For insertion-only multi-line changes, locate the exact anchor line or block with {grep_tool}/{read_tool} and use {insert_tool}."
         )
 
     if strategy == "lapp-structured-grep":
         return (
-            f"Preferred: {grep_tool} with literal=true and format=structured to get a"
-            f" machine-readable anchor, then use that anchor directly in {edit_tool}."
+            f"Use only {grep_tool}, {edit_tool}, {read_tool}, {insert_tool}, and {apply_tool}. "
+            f"Do not use {replace_tool} or {find_tool}. If the prompt contains multiple changes in the same file, your FIRST attempt must be {apply_tool} with the full diff from the prompt. "
+            f"Only if {apply_tool} fails should you use {grep_tool} with literal=true and format=structured to get machine-readable anchors, confirm the exact range with {read_tool}, then apply one {edit_tool} range replacement. For insertion-only multi-line changes, use {insert_tool} after locating the exact anchor block."
         )
 
     if strategy == "lapp-replace-block":
         return (
-            f"Prefer {replace_tool} with the exact old block and new block; "
-            f"if needed, fall back to {find_tool} + {edit_tool}."
+            f"For repeated edits in one file, your FIRST attempt must be {apply_tool} if the full unified diff is provided. Only if {apply_tool} fails should you use {replace_tool} for multi-line replacements. "
+            f"For insertion-only multi-line changes, use {insert_tool} after locating the exact anchor block. Only if {replace_tool} fails with multiple matches or stale refs, use {find_tool} once to recover the exact range, then {edit_tool}."
         )
+    
 
     return ""
 
@@ -478,16 +515,31 @@ def _oc_config(lapp_binary: str | None, work_dir: Path | None) -> str:
     """
     Return opencode config JSON, merging lapp MCP into the user's existing config.
     If lapp_binary is None, returns the base config unchanged (Config A).
+
+    When lapp is enabled (Config B), also register the lapp-tools.md instructions
+    file in the always-on instructions array — matching what lapp-setup does for
+    OpenCode in production. Without this, the model lacks the tool-routing policy
+    that real users get via the instructions[] mechanism.
     """
     base = json.loads(OPENCODE_CONFIG.read_text()) if OPENCODE_CONFIG.exists() else {}
     if lapp_binary is None:
         return json.dumps(base)
     cfg = copy.deepcopy(base)
+    command = [lapp_binary, "--root", str(work_dir)]
+    only_tools = os.environ.get("LAPP_ONLY_TOOLS", "").strip()
+    if only_tools:
+        command.extend(["--only-tools", only_tools])
     cfg.setdefault("mcp", {})["lapp"] = {
         "type": "local",
-        "command": [lapp_binary, "--root", str(work_dir)],
+        "command": command,
         "enabled": True,
     }
+    # Always-on instructions: match lapp-setup's OpenCode integration.
+    if INSTRUCTIONS_FILE.exists():
+        instructions_path = str(INSTRUCTIONS_FILE)
+        instructions = cfg.setdefault("instructions", [])
+        if instructions_path not in instructions:
+            instructions.append(instructions_path)
     return json.dumps(cfg)
 
 
@@ -571,7 +623,7 @@ def run_opencode(
     if last_error and output_tokens == 0:
         return _err(last_error)
 
-    if proc.returncode != 0 and output_tokens == 0:
+    if proc.returncode != 0:
         detail = (proc.stderr[:300] or proc.stdout[:300]).strip()
         return _err(detail or f"exit {proc.returncode}")
 
@@ -704,7 +756,7 @@ def run_instance(instance: dict, lapp_binary: str, strategy: str | None = None) 
             # OpenCode: config injection via OPENCODE_CONFIG_CONTENT; no --allowedTools.
             # Config A = base config (no lapp).  Config B = base + lapp MCP.
             print(f"    [A] read → edit  (opencode/{OPENCODE_MODEL})", flush=True)
-            prompt_a = build_prompt(PROMPT_A_OC, work_dir, iid)
+            prompt_a = build_prompt(PROMPT_A_OC, work_dir, iid, strategy="native-edit")
             result_a = run_opencode(prompt_a, None, work_dir)
             diff_a   = capture_diff(work_dir, iid)
 
@@ -712,7 +764,7 @@ def run_instance(instance: dict, lapp_binary: str, strategy: str | None = None) 
 
             if run_strategy == "native-edit":
                 print(f"    [B] read → edit  (opencode/{OPENCODE_MODEL})", flush=True)
-                prompt_b = build_prompt(PROMPT_A_OC, work_dir, iid)
+                prompt_b = build_prompt(PROMPT_A_OC, work_dir, iid, strategy="native-edit")
                 result_b = run_opencode(prompt_b, None, work_dir)
             else:
                 b_tool_desc = "lapp_lapp_replace_block" if run_strategy == "lapp-replace-block" else "lapp_lapp_grep"
@@ -725,6 +777,7 @@ def run_instance(instance: dict, lapp_binary: str, strategy: str | None = None) 
                     work_dir,
                     iid,
                     strategy_hint=strategy_hint(run_strategy, AGENT),
+                    strategy=run_strategy,
                 )
                 result_b = run_opencode(prompt_b, lapp_binary, work_dir)
 
@@ -738,7 +791,7 @@ def run_instance(instance: dict, lapp_binary: str, strategy: str | None = None) 
             write_lapp_mcp(lapp_binary, work_dir, lapp_mcp)
 
             print(f"    [A] Read → Edit  (claude)", flush=True)
-            prompt_a = build_prompt(PROMPT_A, work_dir, iid)
+            prompt_a = build_prompt(PROMPT_A, work_dir, iid, strategy="native-edit")
             result_a = run_claude(prompt_a, TOOLS_A, empty_mcp, work_dir)
             diff_a   = capture_diff(work_dir, iid)
 
@@ -747,7 +800,7 @@ def run_instance(instance: dict, lapp_binary: str, strategy: str | None = None) 
 
             if run_strategy == "native-edit":
                 print(f"    [B] Read → Edit  (claude)", flush=True)
-                prompt_b = build_prompt(PROMPT_A, work_dir, iid)
+                prompt_b = build_prompt(PROMPT_A, work_dir, iid, strategy="native-edit")
                 result_b = run_claude(prompt_b, TOOLS_A, empty_mcp, work_dir)
             else:
                 tools_b = TOOLS_B_REPLACE_BLOCK if run_strategy == "lapp-replace-block" else TOOLS_B
@@ -758,6 +811,7 @@ def run_instance(instance: dict, lapp_binary: str, strategy: str | None = None) 
                     work_dir,
                     iid,
                     strategy_hint=strategy_hint(run_strategy, AGENT),
+                    strategy=run_strategy,
                 )
                 result_b = run_claude(prompt_b, tools_b, lapp_mcp, work_dir)
 
@@ -926,7 +980,8 @@ def main() -> None:
             )
 
     lapp_binary = shutil.which("lapp")
-    if not lapp_binary:
+    needs_lapp = not (suite_version == "v2" and v2_strategy == "native-edit")
+    if not lapp_binary and needs_lapp:
         print("ERROR: lapp not in PATH — run: go install ./cmd/lapp",
               file=sys.stderr)
         sys.exit(1)

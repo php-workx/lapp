@@ -20,8 +20,7 @@
       ],
       "metadata": {
         "file_size_bucket": "large",
-        "change_count_bucket": "three-to-five-changes",
-        "file_count": 1
+        "change_count_bucket": "three-to-five-changes"
       },
       "strategies": [
         "native-edit",

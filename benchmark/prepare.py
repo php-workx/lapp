@@ -70,6 +70,17 @@ def fetch_file(repo: str, commit: str, filepath: str) -> bytes:
         raise RuntimeError(f"HTTP {exc.code} fetching {url}") from exc
 
 
+def _safe_target(dest_dir: Path, rel_path: str | None) -> Path | None:
+    """Resolve rel_path under dest_dir, rejecting traversal (..) and absolute paths."""
+    if rel_path is None:
+        return None
+    candidate = (dest_dir / rel_path).resolve()
+    if not str(candidate).startswith(str(dest_dir.resolve()) + os.sep):
+        print(f"    WARNING: path escapes dest_dir, skipping: {rel_path}", file=sys.stderr)
+        return None
+    return candidate
+
+
 def fetch_instance_files(instance: dict) -> None:
     iid = instance["instance_id"]
     repo = instance["repo"]
@@ -84,14 +95,23 @@ def fetch_instance_files(instance: dict) -> None:
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     files = changed_files(patch)
+    fetch_errors = 0
     for src_path, dst_path in files:
         if src_path is None:
             # New file — will be created from scratch by the agent. Write an
             # empty placeholder so run.py knows to include it in the work dir.
-            target = dest_dir / dst_path
+            target = _safe_target(dest_dir, dst_path)
+            if target is None:
+                fetch_errors += 1
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"")
             print(f"    (new file) {dst_path}")
+            continue
+
+        target = _safe_target(dest_dir, src_path)
+        if target is None:
+            fetch_errors += 1
             continue
 
         print(f"    fetching {src_path} @ {commit[:8]}…", flush=True)
@@ -99,12 +119,15 @@ def fetch_instance_files(instance: dict) -> None:
             content = fetch_file(repo, commit, src_path)
         except RuntimeError as exc:
             print(f"    WARNING: {exc}", file=sys.stderr)
+            fetch_errors += 1
             continue
 
-        target = dest_dir / src_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
         time.sleep(0.1)   # be a polite guest to GitHub's CDN
+
+    if fetch_errors:
+        raise RuntimeError(f"{fetch_errors} file(s) failed to fetch for {iid}")
 
 
 # ---------------------------------------------------------------------------

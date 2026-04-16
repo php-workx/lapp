@@ -28,6 +28,9 @@ RESULTS_DIR = _base / os.environ.get("RESULTS_SUBDIR", "default")
 # --dir <name> overrides RESULTS_SUBDIR
 if "--dir" in sys.argv:
     idx = sys.argv.index("--dir")
+    if idx + 1 >= len(sys.argv):
+        print("ERROR: --dir requires an argument", file=sys.stderr)
+        sys.exit(1)
     RESULTS_DIR = _base / sys.argv[idx + 1]
     sys.argv = sys.argv[:idx] + sys.argv[idx + 2:]
 
@@ -231,6 +234,8 @@ def main() -> None:
             f"{_tok(sum_a_out):>7}  {_tok(sum_b_out):>7}  {_delta(sum_a_out, sum_b_out):>7}  "
             f"{_tok(sum_a_in):>7}  {_tok(sum_b_in):>7}  "
             f"{'':>7}  {'':>7}  "
+            f"{'':>7}  {'':>7}  "
+            f"{'':>8}  {'':>8}  "
             f"{_pct(avg_sim_a):>6}  {_pct(avg_sim_b):>6}  "
             f"{_cost(sum_a_cost):>7}  {_cost(sum_b_cost):>7}"
         )
