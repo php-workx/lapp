@@ -616,7 +616,7 @@ def auto_combine(datasets, concat_dim='_not_supplied', compat='no_conflicts',
         `combine='nested'` option to open_mfdataset.""")
 
     if _requires_concat_and_merge(datasets):
-        manual_dims = [concat_dim].append(None)
+        manual_dims = [concat_dim, None]
         message += dedent("""\
         The datasets supplied require both concatenation and merging. From
         xarray version 0.13 this will operation will require either using the

@@ -1,5 +1,5 @@
 REGRESSION: copy(deep=True) casts unicode indices to object
-Dataset.copy(deep=True) and DataArray.copy (deep=True/False) accidentally cast IndexVariable's with dtype='<U*' to object. Same applies to copy.copy() and copy.deepcopy().
+Dataset.copy(deep=True) and DataArray.copy (deep=True/False) accidentally cast IndexVariables with dtype='<U*' to object. Same applies to copy.copy() and copy.deepcopy().
 
 This is a regression in xarray >= 0.12.2. xarray 0.12.1 and earlier are unaffected.
 
