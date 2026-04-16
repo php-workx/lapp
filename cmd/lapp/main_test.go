@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestVersionFlag verifies that `lapp --version` prints a non-empty version
@@ -27,7 +29,10 @@ func TestVersionFlag(t *testing.T) {
 		t.Fatalf("build failed: %v\n%s", err, out)
 	}
 
-	cmd := exec.Command(tmpBin.Name(), "--version")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, tmpBin.Name(), "--version")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("lapp --version failed: %v", err)
