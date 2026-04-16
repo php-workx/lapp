@@ -6,11 +6,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
-	"time"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -34,7 +34,8 @@ type Config struct {
 	BlockPatterns []string // glob patterns for blocked paths
 	AllowPatterns []string // override patterns (remove from block list)
 	DefaultLimit  int      // default lapp_read line limit
-}
+	EnabledTools  []string // optional allow-list of exposed tool names; empty means all
+	}
 
 // FileData holds a parsed file's content and metadata.
 type FileData struct {
@@ -292,11 +293,15 @@ func AcquireLock(canonicalPath string) (unlock func(), errCode string) {
 
 // CleanupOrphans removes stale *.lapp.tmp files under root that are older than
 // 5 minutes. Called on server startup per §9.1. Errors are ignored — best effort.
+// Walk-level errors (e.g. permission denied on a directory) do not abort traversal.
 func CleanupOrphans(root string) {
 	cutoff := 5 * time.Minute
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
+		if err != nil {
+			return nil // ignore walk-level errors; continue traversal
+		}
+		if d.IsDir() {
+			return nil
 		}
 		if !strings.HasSuffix(d.Name(), ".lapp.tmp") {
 			return nil
