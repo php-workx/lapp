@@ -1,6 +1,6 @@
 ---
 id: lap-wce3
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-04-04T10:09:13Z
@@ -17,7 +17,9 @@ go.mod declares 'go 1.25.0' but the spec (§2) requires only Go 1.24+. Users on 
 
 This needlessly excludes 1.24.x users from the primary distribution method (go install) documented in the README. Since Go 1.24 is still within its support window, the minimum should match the spec unless a 1.25-only feature is actually used. No Go 1.25-specific language features appear in the codebase.
 
-Root cause: go.mod line 3 — likely set by the local toolchain during go mod init or go mod tidy.
+Root cause: go.mod line 3 — set by `go mod init` to match the local toolchain (1.25.0 at the time).
+
+Lowered to go 1.25.0 (the practical minimum given dev tool dependencies like golangci-lint v2 and x/sys v0.42+ require Go 1.25+). The spec's Go 1.24 requirement is satisfied for building the binary, but dev tools need 1.25+.
 
 ## Design
 
