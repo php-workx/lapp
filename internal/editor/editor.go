@@ -702,19 +702,21 @@ func splice(lines []string, start, end int, replacement []string) []string {
 func generateDiff(original, updated []string, path string) (string, int) {
 	const ctxLines = 2
 
-	// Guard: LCS has O(n×m) memory cost. For large files, fall back to a simple
-	// positional diff that avoids allocation.
+	// Guard: LCS has O(n×m) memory cost. For large files, fall back to a
+	// prefix/suffix heuristic that avoids allocation.
 	const maxLCSLines = 5000
 	if len(original) > maxLCSLines || len(updated) > maxLCSLines {
-		// Count positions that differ (positional heuristic, not true LCS).
+		// Find longest common prefix and suffix.
 		shorter := min(len(original), len(updated))
-		changed := 0
-		for i := 0; i < shorter; i++ {
-			if original[i] != updated[i] {
-				changed++
-			}
+		prefix := 0
+		for prefix < shorter && original[prefix] == updated[prefix] {
+			prefix++
 		}
-		changed += abs(len(original) - len(updated))
+		suffix := 0
+		for suffix < shorter-prefix && original[len(original)-1-suffix] == updated[len(updated)-1-suffix] {
+			suffix++
+		}
+		changed := (len(original) - prefix - suffix) + (len(updated) - prefix - suffix)
 		return fmt.Sprintf("--- a/%s\n+++ b/%s\n[diff omitted: file exceeds %d-line LCS limit]\n", path, path, maxLCSLines), changed
 	}
 
@@ -864,11 +866,4 @@ func lcs(a, b []string) []editOp {
 		ops[l], ops[r] = ops[r], ops[l]
 	}
 	return ops
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
 }
