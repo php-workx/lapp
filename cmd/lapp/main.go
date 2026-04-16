@@ -33,10 +33,11 @@ func mustGetwd() string {
 
 func main() {
 	// Flags.
-	rootFlag    := flag.String("root",     envOr("LAPP_ROOT", mustGetwd()), "Restrict file operations to this directory tree")
-	limitFlag   := flag.Int("limit",       envInt("LAPP_LIMIT", 2000),       "Default max lines returned by lapp_read")
-	logFileFlag := flag.String("log-file", envOr("LAPP_LOG_FILE", ""),       "Write server logs here (default: stderr)")
-	versionFlag := flag.Bool("version",    false,                             "Print version and exit")
+	rootFlag      := flag.String("root", envOr("LAPP_ROOT", mustGetwd()), "Restrict file operations to this directory tree")
+	limitFlag     := flag.Int("limit", envInt("LAPP_LIMIT", 2000), "Default max lines returned by lapp_read")
+	logFileFlag   := flag.String("log-file", envOr("LAPP_LOG_FILE", ""), "Write server logs here (default: stderr)")
+	onlyToolsFlag := flag.String("only-tools", envOr("LAPP_ONLY_TOOLS", ""), "Comma-separated allow-list of exposed lapp tools")
+	versionFlag   := flag.Bool("version", false, "Print version and exit")
 
 	var blockPatterns multiFlag
 	var allowPatterns multiFlag
@@ -88,15 +89,27 @@ func main() {
 		}
 	}
 
+	enabledTools := []string{}
+	if *onlyToolsFlag != "" {
+		for _, name := range strings.Split(*onlyToolsFlag, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				enabledTools = append(enabledTools, name)
+			}
+		}
+	}
+
+
 	cfg := &fileio.Config{
 		Root:          root,
 		BlockPatterns: blocks,
 		AllowPatterns: allows,
 		DefaultLimit:  *limitFlag,
+		EnabledTools:  enabledTools,
 	}
-
 	// Startup: remove orphaned *.lapp.tmp files older than 5 minutes (§9.1).
-	fileio.CleanupOrphans(root)
+	// Runs asynchronously so large trees don't delay server boot.
+	go fileio.CleanupOrphans(root)
 	
 	if err := server.New(cfg).Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "lapp: server error: %v\n", err)
