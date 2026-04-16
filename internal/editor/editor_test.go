@@ -29,7 +29,7 @@ func makeFileData(lines []string) *fileio.FileData {
 		Terminators:    terms,
 		MajorityEnding: "\n",
 		HasBOM:         false,
-		Mode:           fs.FileMode(0644),
+		Mode:           fs.FileMode(0o644),
 		CanonicalPath:  "test/file.go",
 	}
 }
@@ -505,7 +505,6 @@ func TestApplyEdits_InvalidRange(t *testing.T) {
 	}
 }
 
-
 // ── wave 2 bugfix tests ──────────────────────────────────────────────
 
 // lap-1u6m: ERR_LINE_OUT_OF_RANGE instead of ERR_HASH_MISMATCH for out-of-bounds refs.
@@ -560,7 +559,7 @@ func TestApplyEdits_OutOfRangePriorityOverMismatch(t *testing.T) {
 	badRef := strings.Replace(ref(lines, 3), ref(lines, 3)[strings.Index(ref(lines, 3), "#")+1:], "ZZ", 1)
 	_, _, code, _ := editor.ApplyEdits(fd, makeReq("f.go", []editor.Edit{
 		{Type: editor.EditReplace, Anchor: "10#ZZ", Content: strPtr("x")}, // out of range
-		{Type: editor.EditDelete, Anchor: badRef},                           // hash mismatch
+		{Type: editor.EditDelete, Anchor: badRef},                         // hash mismatch
 	}))
 	if code != editor.ErrLineOutOfRange {
 		t.Errorf("expected ErrLineOutOfRange to take priority, got %s", code)

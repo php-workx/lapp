@@ -27,7 +27,7 @@ func newCfg(dir string) *Config {
 // mustWriteFile creates path with the given raw bytes, fataling on error.
 func mustWriteFile(t *testing.T, path string, content []byte) {
 	t.Helper()
-	if err := os.WriteFile(path, content, 0644); err != nil {
+	if err := os.WriteFile(path, content, 0o644); err != nil {
 		t.Fatalf("mustWriteFile %s: %v", path, err)
 	}
 }
@@ -398,4 +398,3 @@ func TestWriteFile_SymlinkPreserved(t *testing.T) {
 		t.Errorf("symlink dest = %q, want %q", dest, target)
 	}
 }
-

@@ -34,10 +34,10 @@ func newTestConfig(t *testing.T) *fileio.Config {
 
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 }
@@ -122,7 +122,6 @@ func callGrepLiteral(t *testing.T, s *Server, pattern, searchPath string) string
 	}
 	return extractText(t, result)
 }
-
 
 func callGrepStructured(t *testing.T, s *Server, pattern, searchPath string) string {
 	t.Helper()
@@ -228,7 +227,6 @@ type parsedOperationSuccess struct {
 	} `json:"warnings"`
 }
 
-
 type parsedFindBlock struct {
 	Matches []struct {
 		Path    string   `json:"path"`
@@ -262,7 +260,6 @@ func TestToolEnabled_OnlyListRestrictsSurface(t *testing.T) {
 		}
 	}
 }
-
 
 func TestGrepLiteralMatchesRegexMetachars(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -331,7 +328,6 @@ func TestGrepLiteralMatchesRegexEscapedPunctuation(t *testing.T) {
 	}
 }
 
-
 func TestGrepStructuredReturnsAnchorAndContext(t *testing.T) {
 	cfg := newTestConfig(t)
 	s := New(cfg)
@@ -373,7 +369,6 @@ func TestGrepStructuredMultipleMatches(t *testing.T) {
 		t.Fatalf("unexpected line numbers: %+v", got.Matches)
 	}
 }
-
 
 func TestFindBlockExactMultilineMatch(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -504,7 +499,6 @@ func TestReplaceBlockAmbiguousMatchErrors(t *testing.T) {
 	}
 }
 
-
 func TestInsertBlockAfterNormalizeWhitespace(t *testing.T) {
 	cfg := newTestConfig(t)
 	s := New(cfg)
@@ -562,7 +556,6 @@ func TestInsertBlockStaleReturnsStructuredRepairPayload(t *testing.T) {
 		t.Fatalf("expected updated anchor line in payload: %+v", payload)
 	}
 }
-
 
 func TestApplyPatchExactReplaceAndInsertDelete(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -730,7 +723,6 @@ func TestRoundTrip_ReadEditSuccess(t *testing.T) {
 	}
 }
 
-
 // Models often copy the displayed ref prefix from lapp_read output, e.g.
 // "2#KH:" instead of the machine form "2#KH". lapp_edit should accept that
 // directly rather than bouncing the model into a retry loop.
@@ -781,7 +773,6 @@ func TestRoundTrip_ReadEditAcceptsColonSuffixedRangeRefs(t *testing.T) {
 		t.Fatalf("file not updated correctly: %s", got)
 	}
 }
-
 
 func TestRoundTrip_ReadEditAcceptsFullDisplayLineAnchor(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -1026,7 +1017,6 @@ func TestRepeatedSearchThenEditAddsWarningPrefix(t *testing.T) {
 	}
 }
 
-
 func TestRepeatedFindBlockThenEditAddsWarningPrefix(t *testing.T) {
 	cfg := newTestConfig(t)
 	s := New(cfg)
@@ -1055,7 +1045,6 @@ func TestRepeatedFindBlockThenEditAddsWarningPrefix(t *testing.T) {
 		t.Fatalf("file not updated correctly: %s", string(data))
 	}
 }
-
 
 func TestRepeatedSearchThenReplaceBlockAddsWarningPrefix(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -1128,6 +1117,7 @@ func TestRepeatedSearchThenApplyPatchAddsWarningPrefix(t *testing.T) {
 		t.Fatalf("expected repeated search warning on apply_patch, got: %+v", resp)
 	}
 }
+
 func TestRepeatedStaleReplaceBlockStrengthensMessage(t *testing.T) {
 	cfg := newTestConfig(t)
 	s := New(cfg)
@@ -1182,7 +1172,6 @@ func TestRepeatedStaleApplyPatchStrengthensMessage(t *testing.T) {
 	}
 	_ = first
 }
-
 
 func TestRoundTrip_SelfCorrectMissingHashMessage(t *testing.T) {
 	cfg := newTestConfig(t)
@@ -1395,7 +1384,6 @@ func TestWriteCreatesParentDirs(t *testing.T) {
 	}
 }
 
-
 // ── new tests covering review findings ──────────────────────────────────────────
 
 // TestGrepPathOutsideRoot verifies that supplying a path outside --root is rejected.
@@ -1494,15 +1482,16 @@ func TestReadFilePermissionDenied(t *testing.T) {
 	cfg := newTestConfig(t)
 	filePath := filepath.Join(cfg.Root, "secret.txt")
 	writeTestFile(t, filePath, "data")
-	if err := os.Chmod(filePath, 0000); err != nil {
+	if err := os.Chmod(filePath, 0o000); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	t.Cleanup(func() { os.Chmod(filePath, 0644) })
+	t.Cleanup(func() { os.Chmod(filePath, 0o644) })
 	_, code := fileio.ReadFile(filePath, cfg)
 	if code != fileio.ErrPermissionDenied {
 		t.Errorf("expected ErrPermissionDenied, got %q", code)
 	}
 }
+
 // TestBOMRoundTrip verifies that a UTF-8 BOM file survives a full read→edit→write cycle.
 // BOM bytes must be present at byte offset 0 of the on-disk file after editing.
 func TestBOMRoundTrip(t *testing.T) {
@@ -1548,7 +1537,6 @@ func TestBOMRoundTrip(t *testing.T) {
 		t.Errorf("edited content not found in file: %s", string(raw))
 	}
 }
-
 
 // TestNoOpLeavesNoTempFile verifies that when all edits are no-ops,
 // handleEdit returns ERR_NO_OP and leaves no *.lapp.tmp files on disk.
