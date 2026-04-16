@@ -1,5 +1,3 @@
-import os
-
 #!/usr/bin/env python3
 """
 Fetch the source files changed by each benchmark instance.
@@ -15,6 +13,7 @@ Usage:
 """
 
 import json
+import os
 import re
 import sys
 import time
