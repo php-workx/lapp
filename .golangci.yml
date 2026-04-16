@@ -1,0 +1,125 @@
+version: "2"
+
+# golangci-lint v2 configuration for lapp
+# Keep version in sync with justfile and CI
+
+run:
+  timeout: 3m
+
+linters:
+  exclusions:
+    rules:
+      # Test files: relax some checks
+      - path: '(.+)_test\.go'
+        linters:
+          - goconst     # test fixtures use repeated string literals intentionally
+          - gocritic    # test readability trumps micro-optimizations
+          - errcheck    # test cleanup paths (os.Chmod, json.Unmarshal) are best-effort
+          - prealloc    # test slice preallocation is unnecessary
+          - revive      # test naming conventions are more relaxed
+
+      # Internal editor functions: unparam false positives (params used by callers via interface)
+      - path: internal/editor/
+        linters:
+          - unparam
+
+  enable:
+    # Type safety & correctness
+    - staticcheck
+    - govet
+
+    # Bug detection
+    - errcheck
+    - bodyclose
+    # - nilerr  # disabled: MCP handlers return errors in the result slot (ToolResult, error),
+    #            # so returning (errorResult, nil) is correct — nilerr flags these as false positives
+    - nilnil
+
+    # Style & consistency
+    - revive
+    - goconst
+    - unconvert
+    - unparam
+    - usestdlibvars
+
+    # Complexity
+    - gocognit
+    - cyclop
+
+    # Security
+    - gosec
+
+    # Code hygiene
+    - gocritic
+    - prealloc
+    - mirror
+    - nolintlint
+
+  settings:
+    gocognit:
+      min-complexity: 120  # TODO: lower to 30 once handleGrep and generateDiff are refactored
+
+    cyclop:
+      max-complexity: 60  # TODO: lower to 22 once handleGrep and handleInsertBlock are refactored
+
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+
+    errcheck:
+      # Cleanup-path calls where ignoring the error is intentional
+      exclude-functions:
+        - os.Remove
+        - (*os.File).Close
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: range
+        - name: receiver-naming
+        - name: indent-error-flow
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: unnecessary-stmt
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - whyNoLint     # handled by nolintlint
+        - hugeParam     # changing signatures is risky for MCP handler interfaces
+        - unnamedResult # internal functions; naming adds verbosity without clarity
+        - ifElseChain   # diff algorithm uses if-else for readability; switch changes semantics
+        - appendAssign  # main.go uses full-slice append to shadow; intentional copy
+        - exitAfterDefer # main.go error-exit pattern; defer is file Close, acceptable to skip
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    gosec:
+      excludes:
+        - G104  # unhandled errors — errcheck covers this
+        - G115  # integer overflow conversions — platform-specific, intentional for fd/pid
+        - G122  # filepath.WalkDir callback race — already mitigated by root-scoped usage
+        - G204  # subprocess launch — test files use exec.Command intentionally
+        - G301  # dir perms 0755 — standard for work directories in a file-based tool
+        - G302  # file perms 0644 — standard for non-secret data files
+        - G304  # file inclusion via variable — lapp is a file-management tool by design
+        - G306  # WriteFile 0644 — same as G302
+
+
+formatters:
+  enable:
+    - gofumpt

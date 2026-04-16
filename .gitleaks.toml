@@ -1,0 +1,11 @@
+# gitleaks configuration for lapp
+# Extend the bundled rules — only add repo-specific allowlists.
+[extend]
+  useDefault = true
+
+[allowlist]
+  description = "Allowed patterns"
+  # Benchmark fixtures contain SWE-bench instances with fake credential patterns.
+  paths = [
+    '''benchmark/files/''',
+  ]
