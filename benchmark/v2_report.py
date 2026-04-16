@@ -114,7 +114,7 @@ def parse_strategy(
     grep_format: object,
     strategy_list: list[str],
     model_dir: str,
-) -> str | None:
+ ) -> str | None:
     if isinstance(value, str):
         candidate = value.strip()
         if candidate in strategy_list:
@@ -125,18 +125,19 @@ def parse_strategy(
         if candidate in strategy_list:
             return candidate
 
-    if isinstance(grep_format, str):
-        if grep_format == "text" and "lapp-text-grep" in strategy_list:
-            return "lapp-text-grep"
-        if grep_format == "structured" and "lapp-structured-grep" in strategy_list:
-            return "lapp-structured-grep"
-
     if "__grep-" in model_dir:
         suffix = model_dir.split("__grep-", 1)[1]
         if suffix == "structured" and "lapp-structured-grep" in strategy_list:
             return "lapp-structured-grep"
         if suffix == "text" and "lapp-text-grep" in strategy_list:
             return "lapp-text-grep"
+
+    if isinstance(grep_format, str) and model_dir.endswith("__lapp-structured-grep") and "lapp-structured-grep" in strategy_list:
+        return "lapp-structured-grep"
+    if isinstance(grep_format, str) and model_dir.endswith("__lapp-text-grep") and "lapp-text-grep" in strategy_list:
+        return "lapp-text-grep"
+    if isinstance(grep_format, str) and model_dir.endswith("__lapp-replace-block") and "lapp-replace-block" in strategy_list:
+        return "lapp-replace-block"
 
     return None
 

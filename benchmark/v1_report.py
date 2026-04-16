@@ -141,7 +141,7 @@ def main():
             if grep_format != "text":
                 model_label += f" [grep={grep_format}]"
             if not s:
-                rows_out.append([model_label, f"0/{len(expected)}", "—", "—", "—", "—", "—", "—", "—", "—", "—"])
+                rows_out.append([model_label, f"0/{len(expected)}", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—", "—"])
                 continue
             rows_out.append([
                 model_label,
