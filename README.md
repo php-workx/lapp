@@ -120,7 +120,9 @@ Search files and return matches with `LINE#HASH` references usable directly in `
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `pattern` | string | yes | Regex pattern |
+| `pattern` | string | yes | Pattern to search for (regex unless `literal=true`) |
+| `literal` | boolean | no | Treat `pattern` as a fixed string (no regex). Use when searching for code with special characters |
+| `format` | string | no | Output format: `text` (default) or `structured` (machine-readable JSON) |
 | `path` | string | no | File or directory (default: root) |
 | `context` | integer | no | Context lines (default: 2) |
 
@@ -132,6 +134,7 @@ Search files and return matches with `LINE#HASH` references usable directly in `
 | `--limit <n>` | `LAPP_LIMIT` | 2000 | Default max lines for lapp_read |
 | `--block <glob>` | `LAPP_BLOCK` (colon-separated) | see below | Add blocked path pattern |
 | `--allow <glob>` | `LAPP_ALLOW` (colon-separated) | — | Remove blocked path pattern |
+| `--only-tools <list>` | `LAPP_ONLY_TOOLS` | — | Expose only selected tools |
 | `--log-file <path>` | `LAPP_LOG_FILE` | stderr | Log destination |
 | `--version` | — | — | Print version and exit |
 
