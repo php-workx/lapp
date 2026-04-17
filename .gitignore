@@ -1,6 +1,11 @@
 # AgentOps session artifacts (auto-added)
 .agents/
 __pycache__/
+
+# Tool artifacts (not project code)
+.serena/
+.tickets/
+
 benchmark/repos/
 benchmark/results/
 

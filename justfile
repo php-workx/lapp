@@ -114,8 +114,11 @@ format:
 
 # Set up git hooks and development environment
 setup: install-dev
-    git config core.hooksPath .githooks
-    @echo "Git hooks configured (.githooks/)"
+    @mkdir -p .git/hooks
+    @cp -f scripts/pre-commit .git/hooks/pre-commit 2>/dev/null || true
+    @cp -f scripts/pre-push .git/hooks/pre-push 2>/dev/null || true
+    @chmod +x .git/hooks/pre-commit .git/hooks/pre-push 2>/dev/null || true
+    @echo "Git hooks installed (.git/hooks/)"
 
 # Cache required development tools (pinned in tools.mod)
 install-dev:
