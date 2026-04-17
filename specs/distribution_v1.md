@@ -62,7 +62,7 @@ npx -y @morphllm/morph-setup
 | **Skills** | 4 bundled (code-edit, code-research, explore, feature-research) | 1 bundled (lapp-edit policy) |
 | **Instructions** | Compact instructions in CLAUDE.md | lapp-tools.md (editing policy) |
 | **Binary management** | None (npm handles it) | Must download binary from GitHub releases |
-| **Config entry** | `command: "npx"`, `args: ["-y", "@morphllm/morphmcp"]` | `command: "/path/to/lapp"`, `args: ["--root", "<cwd>"]` |
+| **Config entry** | `command: "npx"`, `args: ["-y", "@morphllm/morphmcp"]` | `command: "/path/to/lapp"` (omit `--root`; defaults to cwd) |
 
 The biggest difference is **binary distribution**. Morph's MCP server is an npm package — `npx` resolves it. Lapp is a Go binary — the setup CLI must download the correct binary for the user's OS/arch from GitHub Releases.
 
@@ -129,7 +129,8 @@ The biggest difference is **binary distribution**. Morph's MCP server is an npm 
     "commander": "^13.1.0",
     "gray-matter": "^4.0.3",
     "json5": "^2.2.3",
-    "simple-git": "^3.27.0"
+    "simple-git": "^3.27.0",
+    "tar": "^7.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -297,14 +298,13 @@ const agents = {
 
 ### 7.1 Entry Shape
 
-For lapp, the MCP server entry points to the installed binary with `--root` set to the project directory:
+For lapp, the MCP server entry points to the installed binary (omit `--root` so runtime cwd is used):
 
 ```json
 {
   "lapp": {
     "type": "stdio",
     "command": "/Users/xxx/.lapp/bin/lapp",
-    "args": ["--root", "/path/to/project"],
     "env": {}
   }
 }
@@ -446,13 +446,11 @@ The plugin package (`@morphllm/opencode-morph-plugin`) is a full OpenCode plugin
 ```
 The key insight: OpenCode has an **`instructions` array** in its config. Files listed there are **always loaded** by the agent — no skill load step required. This is different from Claude Code (where CLAUDE.md is the always-on instruction surface, and skills are loaded on-demand).
 
-**For lapp**, we need to create a similar plugin or take a simpler approach:
+**For lapp V1** (instructions-only, no MCP config entry for OpenCode):
 
-- **Option A (Full plugin):** Create `@lapp-dev/opencode-lapp-plugin` npm package that registers lapp's MCP tools via the OpenCode plugin SDK. The plugin ships `instructions/lapp-tools.md` inside it.
-- **Option B (Instructions-only, recommended for V1):** Since lapp's MCP server is a stdio binary (not a JS SDK), OpenCode can discover it via the standard MCP config mechanism. We:
-  1. Write the MCP server config to `~/.config/opencode/opencode.json` under the `mcpServers` key (if OpenCode supports it)
-  2. Copy `instructions/lapp-tools.md` to `~/.config/opencode/instructions/lapp-tools.md`
-  3. Add the path to the `instructions` array in `opencode.json`
+1. Do not write an OpenCode `mcpServers` entry — lapp is a stdio MCP server that OpenCode auto-discovers on PATH
+2. Copy `instructions/lapp-tools.md` to `~/.config/opencode/instructions/lapp-tools.md`
+3. Add the path to the `instructions` array in `opencode.json`
 
 **The instructions array is the critical OpenCode-specific mechanism.** It's how OpenCode ensures the agent always knows about lapp's tool selection policy without needing a skill load. This is analogous to CLAUDE.md injection for Claude Code, but uses a different mechanism (config array vs. file append).
 
@@ -532,7 +530,7 @@ Same pattern as Cursor/Windsurf. Config at `~/.gemini/antigravity/mcp_config.jso
 | Client | MCP config | Instructions injection | Plugin install | Skill install | Skill mode | Extra steps |
 |--------|-----------|------------------------|----------------|---------------|------------|-------------|
 | **Claude Code** | `~/.claude.json` | `~/.claude/CLAUDE.md` append | — | `~/.claude/skills/` | symlink | — |
-| **OpenCode** | skip (or via plugin) | `~/.config/opencode/opencode.json` → `instructions[]` array | npm plugin (V2) | `~/.config/opencode/skills/` | symlink | Copy `instructions/lapp-tools.md` to `~/.config/opencode/instructions/` |
+| **OpenCode** | skip | `~/.config/opencode/opencode.json` → `instructions[]` array | npm plugin (V2) | `~/.config/opencode/skills/` | symlink | Copy `instructions/lapp-tools.md` to `~/.config/opencode/instructions/` |
 | **Codex** | `~/.codex/config.toml` | — | — | `~/.codex/skills/` | symlink | — |
 | **Cursor** | `~/.cursor/mcp.json` | — | — | `~/.cursor/skills/` | **copy** | No symlinks |
 | **Windsurf** | `~/.codeium/windsurf/mcp_config.json` | — | — | `~/.codeium/windsurf/skills/` | symlink | — |
@@ -780,7 +778,7 @@ OpenCode gets different extra treatment:
 
 This is the "always-on instructions" pattern specific to OpenCode — files in the `instructions` array are loaded automatically by the agent without a skill-load step. This is functionally equivalent to CLAUDE.md injection for Claude Code, but uses a config array instead of file appending.
 
-**V2:** Create a full `@lapp-dev/opencode-lapp-plugin` npm package that registers lapp's tools via the OpenCode plugin SDK (`@opencode-ai/plugin`). This would allow richer integration (custom tool metadata, environment setup). For V1, instructions-only is sufficient since lapp is a stdio MCP server that OpenCode discovers via standard config.
+**V2:** Create a full `@lapp-dev/opencode-lapp-plugin` npm package for richer integration via the OpenCode plugin SDK.
 
 ### 11.6 `src/installer.ts`
 
@@ -927,7 +925,6 @@ The setup CLI version is independent of the lapp binary version. The setup CLI a
 | `lapp-setup --uninstall` | Remove binary, configs, skills, CLAUDE.md injection |
 | Project-local config | Install `.claude/skills/lapp-edit/` in current project (not global) |
 | Windows `PATH` via registry | More robust than profile editing on Windows |
-| Checksum verification | Verify binary checksums from `checksums.txt` in release |
 | Additional skills | `lapp-refactor`, `lapp-batch-edit` — as the tool set grows |
 
 ---
