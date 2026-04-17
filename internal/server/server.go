@@ -23,6 +23,8 @@ import (
 // Version is overridden via -ldflags at build time (see justfile).
 var Version = "dev"
 
+const maxFindBlockMatches = 500
+
 // Server wraps an MCPServer with project configuration.
 type Server struct {
 	cfg   *fileio.Config
@@ -804,7 +806,9 @@ type blockMatch struct {
 }
 
 type findBlockResult struct {
-	Matches []blockMatch `json:"matches"`
+	Matches      []blockMatch `json:"matches"`
+	TotalMatches int          `json:"total_matches"`
+	Truncated    bool         `json:"truncated"`
 }
 
 type patchHunk struct {
@@ -1084,8 +1088,14 @@ func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError("content parameter required"), nil
 	}
 	lines := fd.Lines
+	allRanges := findBlockRanges(lines, needle, normalizeWhitespace)
+	totalMatches := len(allRanges)
+	truncated := totalMatches > maxFindBlockMatches
+	if truncated {
+		allRanges = allRanges[:maxFindBlockMatches]
+	}
 	var matches []blockMatch
-	for _, m := range findBlockRanges(lines, needle, normalizeWhitespace) {
+	for _, m := range allRanges {
 		startLine := m.start
 		endLine := m.end
 		preview := make([]string, 0, len(needle))
@@ -1101,7 +1111,7 @@ func (s *Server) handleFindBlock(ctx context.Context, req mcp.CallToolRequest) (
 	}
 	s.recordFindBlock(canonical)
 	s.recordSearchOp(canonical)
-	jsonBytes, _ := json.Marshal(findBlockResult{Matches: matches})
+	jsonBytes, _ := json.Marshal(findBlockResult{Matches: matches, TotalMatches: totalMatches, Truncated: truncated})
 	return mcp.NewToolResultText(string(jsonBytes)), nil
 }
 
