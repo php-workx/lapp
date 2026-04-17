@@ -44,7 +44,7 @@ def patch_similarity(applied: str, reference: str) -> float:
     Similarity between the agent's diff and the reference patch, based on
     the set of added/removed lines (ignores line numbers and context lines).
 
-    Returns 0.0–1.0. A score of 1.0 means the agent produced exactly the
+    Returns 0.0-1.0. A score of 1.0 means the agent produced exactly the
     same changes as the reference fix. Low scores don't mean the fix is
     wrong — the agent may have used a different but equivalent approach.
     """
@@ -129,7 +129,11 @@ def load_results(ids: list[str]) -> list[dict]:
         if not p.exists():
             print(f"WARNING: {p} not found — skipping", file=sys.stderr)
             continue
-        results.append(json.loads(p.read_text()))
+        try:
+            results.append(json.loads(p.read_text()))
+        except json.JSONDecodeError as e:
+            print(f"WARNING: {p} is not valid JSON — skipping: {e}", file=sys.stderr)
+            continue
     return results
 
 

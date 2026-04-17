@@ -356,7 +356,6 @@ def strategy_hint(strategy: str, agent: str) -> str:
             f"For insertion-only multi-line changes, use {insert_tool} after locating the exact anchor block. Only if {replace_tool} fails with multiple matches or stale refs, use {find_tool} once to recover the exact range, then {edit_tool}."
         )
 
-
     return ""
 
 
