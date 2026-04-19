@@ -62,7 +62,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go build -ldflags "-X main.Version=$(git describe --tags --always --dirty) -X main.GitCommit=$(git rev-parse --short HEAD) -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o /dev/null ./cmd/lapp
+      - run: go build -ldflags "-X main.Version=$(git describe --tags --always --dirty)" -o /dev/null ./cmd/lapp
 
   mod-tidy:
     name: Mod Tidy
@@ -87,3 +87,14 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go tool -modfile=tools.mod govulncheck ./...
+
+  trufflehog:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --results=verified,unknown

@@ -1,4 +1,4 @@
-# gitleaks configuration for lapp
+# betterleaks configuration for lapp
 # Extend the bundled rules — only add repo-specific allowlists.
 [extend]
   useDefault = true
