@@ -64,6 +64,23 @@ lapp is deliberately optimized for the **apply** stage of coding agents:
 
 This is why the benchmark does **not** ask models to debug issues from scratch. It gives them real files and concrete changes so we can measure the apply system itself, not general coding ability.
 
+## Benchmark
+
+Multi-hunk edit on a large file (seaborn, 1800+ lines, 3-5 simultaneous changes). Correctness measured by diff similarity against the reference patch. Native edit timed out on several models; lapp strategies achieved up to 100% correctness where native edit failed.
+
+| Model | Strategy | Correctness | Wall Time |
+|-------|----------|-------------|-----------|
+| GLM-5.1 | native edit | 12% | 84s |
+| GLM-5.1 | lapp replace-block | **94%** | 59s |
+| DeepSeek v3.1 | native edit | 3% (timeout) | — |
+| DeepSeek v3.1 | lapp structured-grep | **94%** | 102s |
+| MiniMax M2.7 | native edit | 10% | 93s |
+| MiniMax M2.7 | lapp structured-grep | **100%** | 72s |
+| Kimi K2 | native edit | 11% | 116s |
+| Kimi K2 | lapp structured-grep | **94%** | 37s |
+
+Full results and methodology in [`benchmark/`](benchmark/).
+
 
 ## Tools
 
