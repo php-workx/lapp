@@ -13,8 +13,8 @@ import (
 	"github.com/lapp-dev/lapp/internal/server"
 )
 
-// buildVersion is set by goreleaser ldflags: -X main.buildVersion={{.Version}}
-var buildVersion = "dev"
+// Version is set by goreleaser ldflags: -X main.Version={{.Version}}
+var Version = "dev"
 
 // multiFlag is a custom flag.Value for repeatable string flags (e.g. --block, --allow).
 type multiFlag []string
@@ -47,7 +47,7 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Println(buildVersion)
+		fmt.Println(Version)
 		return
 	}
 

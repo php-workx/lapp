@@ -9,9 +9,7 @@ export GOTOOLCHAIN := "auto"
 go_tool := "go tool -modfile=tools.mod"
 
 version := `git describe --tags --always --dirty 2>/dev/null || echo "dev"`
-commit := `git rev-parse --short HEAD 2>/dev/null || echo "unknown"`
-build_date := `date -u +"%Y-%m-%dT%H:%M:%SZ"`
-ldflags := "-X main.Version=" + version + " -X main.GitCommit=" + commit + " -X main.BuildDate=" + build_date + " -X github.com/lapp-dev/lapp/internal/server.Version=" + version
+ldflags := "-X main.Version=" + version + " -X github.com/lapp-dev/lapp/internal/server.Version=" + version
 
 default:
     @just --list
@@ -19,7 +17,7 @@ default:
 # --- Quality gates ---
 
 # Pre-commit: fast local checks + fresh non-race tests
-pre-commit: fmt vet lint build-check mod-tidy gitleaks test-fast
+pre-commit: fmt vet lint build-check mod-tidy betterleaks test-fast
 
 # Pre-push: pre-commit checks + race tests + vulnerability scan
 pre-push: pre-commit test-race vuln
@@ -48,11 +46,11 @@ lint:
 # --- Security ---
 
 # Scan for leaked secrets
-gitleaks:
-    @if command -v gitleaks >/dev/null 2>&1; then \
-        gitleaks git --no-banner; \
+betterleaks:
+    @if command -v betterleaks >/dev/null 2>&1; then \
+        betterleaks git --no-banner; \
     else \
-        echo "warning: gitleaks not installed, skipping secret scan"; \
+        echo "warning: betterleaks not installed, skipping secret scan"; \
     fi
 
 # Scan for known vulnerabilities in dependencies
